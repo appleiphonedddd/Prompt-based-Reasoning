@@ -217,14 +217,24 @@ class ToT(BaseBaseline):
         """
         task_ctx = getattr(self, "_task_context", None)
         if task_ctx:
-            prompt = (
-                task_ctx + "\n\n"
-                "Current state:\n" + node.state + "\n\n"
-                "Propose several possible next reasoning steps toward solving this problem.\n"
-                "For each step, show your reasoning and end the line with "
-                "[state: <updated state after this step>].\n"
-                "List each step on a new line. Be specific and concrete."
-            )
+            if node.depth == 0:
+                # Root node: state is the original question; ask for first steps.
+                prompt = (
+                    task_ctx + "\n\n"
+                    "Problem:\n" + node.state + "\n\n"
+                    "Propose " + str(self.n_generate_sample) + " distinct candidate "
+                    "FIRST reasoning steps toward solving this problem.\n"
+                    "Each step should be on its own line. Be specific and concrete."
+                )
+            else:
+                # Deeper node: state is the accumulated reasoning so far.
+                prompt = (
+                    task_ctx + "\n\n"
+                    "Reasoning so far:\n" + node.state + "\n\n"
+                    "Propose " + str(self.n_generate_sample) + " distinct candidate "
+                    "NEXT reasoning steps that continue from the above.\n"
+                    "Each step should be on its own line. Be specific and concrete."
+                )
         else:
             prompt = self.propose_prompt.format(state=node.state)
         response = self.call_llm(prompt, temperature=self.propose_temperature)
@@ -235,8 +245,9 @@ class ToT(BaseBaseline):
     def parse_thoughts(self, text: str) -> List[str]:
         """Extract individual thought steps from the LM's raw output.
 
-        Each line that contains an arithmetic expression is treated as
-        one thought candidate.
+        For Game of 24 (numeric state), only lines containing digits are
+        kept.  For other tasks the full non-empty line set is returned so
+        that textual reasoning steps are not silently discarded.
 
         Args:
             text: Raw LM output containing proposed steps.
@@ -245,22 +256,26 @@ class ToT(BaseBaseline):
             List of non-empty thought strings.
         """
         lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-        # Keep lines that look like arithmetic steps (contain digits and operators)
-        thoughts = [ln for ln in lines if re.search(r"\d", ln)]
-        return thoughts
+        is_game_of_24 = not getattr(self, "_task_context", None)
+        if is_game_of_24:
+            lines = [ln for ln in lines if re.search(r"\d", ln)]
+        return lines
 
     def extract_remaining(self, thought: str, current_state: str) -> str:
-        """Extract the remaining numbers from a thought string.
+        """Extract the state that follows from applying a thought step.
 
-        Looks for a parenthetical pattern "(left: x y z)" or similar.
-        Falls back to the current state if nothing is found.
+        For Game of 24 looks for structured "(left: x y z)" or "[state: ...]"
+        markers.  For all other tasks, the new state is the *accumulated*
+        reasoning so far: current_state appended with the new thought.  This
+        ensures that each deeper tree level builds on previous steps rather
+        than re-starting from the original question.
 
         Args:
-            thought:       The thought string (e.g. "13 - 9 = 4 (left: 4 4 10)").
-            current_state: Fallback state if parsing fails.
+            thought:       The thought string produced by the LM.
+            current_state: The state of the parent node.
 
         Returns:
-            A string of space-separated remaining numbers.
+            A string representing the updated state after this thought.
         """
         # Generic state marker for non-Game-of-24 tasks
         match = re.search(r"\[state:\s*([^\]]+)\]", thought, re.IGNORECASE)
@@ -270,9 +285,13 @@ class ToT(BaseBaseline):
         match = re.search(r"left[:\s]+([0-9 ]+)", thought, re.IGNORECASE)
         if match:
             return match.group(1).strip()
-        # Alternative: "= 24" means we are done — return "24" as terminal state
+        # Terminal: "= 24" means we solved Game of 24
         if re.search(r"=\s*24\b", thought):
             return "24"
+        # For non-Game-of-24 tasks: accumulate reasoning so the next level
+        # receives context instead of seeing the original question again.
+        if getattr(self, "_task_context", None):
+            return current_state + "\n" + thought
         return current_state
 
     # ══════════════════════════════════════════

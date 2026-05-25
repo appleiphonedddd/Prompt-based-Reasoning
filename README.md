@@ -131,7 +131,7 @@ python main.py --model qwen2.5:32b --baseline zerocot --benchmark mgsm
 
 **Tree-of-Thought — breadth-first reasoning search**
 ```bash
-python main.py --model qwen2.5:32b --baseline tot --benchmark gameof24 --tot_n_generate 2 --tot_n_evaluate 1 --tot_breadth 2  --tot_max_steps  1
+python main.py --model qwen2.5:32b --baseline tot --benchmark gameof24 --tot_n_generate 2 --tot_n_evaluate 1 --tot_breadth 2  --tot_max_steps 1
 ```
 
 **Graph-of-Thought — non-linear thought graphs**
