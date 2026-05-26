@@ -58,6 +58,61 @@ that equals 24.  Reply with the expression only, no "= 24" suffix \
 (e.g. "(10 - 4) * (9 - 5)").
 Expression:"""
 
+# ─────────────────────────────────────────────
+#  Plan-level ToT prompts (generic, non-Game-of-24 tasks)
+#
+#  Follows the generic zero-shot ToT-BFS the ToT authors describe in
+#  Appendix B.1 of the paper: sample k complete strategies → vote for the
+#  best → sample k complete solutions following it → vote for the best.
+#  The thought unit is a *whole* strategy/solution, which keeps the reasoning
+#  coherent — unlike a per-fragment tree whose pieces are selected by a
+#  value function that, for free-form tasks, cannot discriminate.
+# ─────────────────────────────────────────────
+
+STRATEGY_PROMPT = """{task_ctx}
+
+Problem:
+{question}
+
+Propose ONE concise high-level strategy for solving this problem: outline the \
+key steps or approach you would take. Do NOT carry out the full computation or \
+give the final answer yet — describe only the plan."""
+
+SOLUTION_PROMPT = """{task_ctx}
+
+Problem:
+{question}
+
+Strategy to follow:
+{strategy}
+
+Now solve the problem step by step, following the strategy above. Show your \
+work, then state the final answer clearly on the last line."""
+
+VOTE_PROMPT = """{task_ctx}
+
+Problem:
+{question}
+
+Below are several candidate {kind}s for solving the problem. Decide which one \
+is most promising for reaching the correct answer.
+
+{listing}
+
+Briefly analyze each choice, then conclude on the LAST line with exactly:
+"The best choice is X" — where X is the integer id of the best choice."""
+
+FINALIZE_PROMPT = """{task_ctx}
+
+Problem:
+{question}
+
+Worked solution:
+{solution}
+
+Based on the worked solution above, output ONLY the final answer — no \
+explanation, no restating of the question."""
+
 # Matches a Game of 24 input: exactly four space-separated positive integers.
 _GAME_OF_24_RE = re.compile(r"^\d+(?:\s+\d+){3}$")
 
@@ -277,22 +332,28 @@ class ToT(BaseBaseline):
         Returns:
             A string representing the updated state after this thought.
         """
-        # Generic state marker for non-Game-of-24 tasks
+        # The "(left: …)" and "= 24" markers are Game-of-24-specific terminal
+        # heuristics and MUST stay scoped to Game of 24.  Leaking them into
+        # other numeric tasks (e.g. multistep arithmetic) made any step that
+        # merely mentioned "= 24" get mis-declared the solution, derailing the
+        # search and inflating/deflating accuracy by luck.
+        is_game_of_24 = getattr(self, "_task_context", None) is None
+        if is_game_of_24:
+            # Pattern: "(left: 4 4 10)" or "left: 4 4 10"
+            match = re.search(r"left[:\s]+([0-9 ]+)", thought, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+            # Terminal: "= 24" means Game of 24 is solved
+            if re.search(r"=\s*24\b", thought):
+                return "24"
+            return current_state
+
+        # Non-Game-of-24 (legacy fragment path): accumulate reasoning so the
+        # next level receives context instead of the original question again.
         match = re.search(r"\[state:\s*([^\]]+)\]", thought, re.IGNORECASE)
         if match:
             return match.group(1).strip()
-        # Pattern: "(left: 4 4 10)" or "left: 4 4 10" — Game of 24
-        match = re.search(r"left[:\s]+([0-9 ]+)", thought, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        # Terminal: "= 24" means we solved Game of 24
-        if re.search(r"=\s*24\b", thought):
-            return "24"
-        # For non-Game-of-24 tasks: accumulate reasoning so the next level
-        # receives context instead of seeing the original question again.
-        if getattr(self, "_task_context", None):
-            return current_state + "\n" + thought
-        return current_state
+        return current_state + "\n" + thought
 
     # ══════════════════════════════════════════
     #  State Evaluator  V(pθ, S)
@@ -534,6 +595,123 @@ class ToT(BaseBaseline):
         return answer or "No solution found."
 
     # ══════════════════════════════════════════
+    #  Plan-level ToT  (generic non-Game-of-24 tasks)
+    # ══════════════════════════════════════════
+
+    def _sample_n(self, prompt: str, k: int, temperature: float) -> List[str]:
+        """Sample k i.i.d. completions for a prompt; keep non-empty texts."""
+        out: List[str] = []
+        for _ in range(k):
+            resp = self.call_llm(prompt, temperature=temperature)
+            text = resp.content.strip()
+            if text:
+                out.append(text)
+        return out
+
+    @staticmethod
+    def _parse_vote(text: str, n: int) -> Optional[int]:
+        """Parse a 0-based winning index from a vote response.
+
+        Looks for "the best choice is X"; otherwise falls back to the last
+        integer that is in range.  Returns None if nothing usable is found.
+        """
+        ids = re.findall(r"best\s+choice\s+is\s*\**\s*#?\s*(\d+)", text, re.IGNORECASE)
+        if not ids:
+            ids = re.findall(r"\b(\d+)\b", text)
+        for raw in reversed(ids):
+            idx = int(raw) - 1
+            if 0 <= idx < n:
+                return idx
+        return None
+
+    def _vote_best(
+        self, task_ctx: str, question: str,
+        candidates: List[str], kind: str, log: List[str],
+    ) -> int:
+        """Majority-vote across n_evaluate_sample calls for the best candidate.
+
+        Unlike the per-state sure/likely/impossible evaluator (which cannot
+        discriminate between free-form reasoning steps), voting *compares*
+        whole candidates against each other and yields a real choice signal.
+        """
+        if len(candidates) <= 1:
+            return 0
+        listing = "\n\n".join(
+            f"Choice {i + 1}:\n{c}" for i, c in enumerate(candidates)
+        )
+        prompt = VOTE_PROMPT.format(
+            task_ctx=task_ctx, question=question, kind=kind, listing=listing,
+        )
+        votes: List[int] = []
+        for _ in range(self.n_evaluate_sample):
+            resp = self.call_llm(prompt, temperature=self.value_temperature)
+            idx = self._parse_vote(resp.content, len(candidates))
+            if idx is not None:
+                votes.append(idx)
+        best_idx = max(set(votes), key=votes.count) if votes else 0
+        log.append(
+            f"[plan-ToT] {kind} votes={[v + 1 for v in votes]} → choice {best_idx + 1}"
+        )
+        return best_idx
+
+    def _finalize_answer(self, question: str, solution: str, task_ctx: str) -> str:
+        """Ask the LM to emit only the final answer from a worked solution."""
+        prompt = FINALIZE_PROMPT.format(
+            task_ctx=task_ctx, question=question, solution=solution,
+        )
+        resp = self.call_llm(prompt, temperature=0.0)
+        answer = resp.content.strip()
+        for line in answer.splitlines():
+            line = line.strip()
+            if line:
+                return line
+        return answer or "No solution found."
+
+    def _plan_level_solve(
+        self, question: str, task_ctx: str, propose_temp: float,
+    ) -> Tuple[str, str, str, List[str]]:
+        """Generic plan-level ToT-BFS for non-Game-of-24 tasks.
+
+        Two voting levels over *complete* candidates:
+          1. sample k strategies      → vote best strategy
+          2. sample k full solutions  → vote best solution
+        then extract a clean final answer from the winning solution.
+
+        Returns:
+            (final_answer, best_strategy, best_solution, log)
+        """
+        log: List[str] = []
+        k = max(1, self.n_generate_sample)
+
+        # ── Level 1: strategies ──
+        strategies = self._sample_n(
+            STRATEGY_PROMPT.format(task_ctx=task_ctx, question=question),
+            k, propose_temp,
+        )
+        log.append(f"[plan-ToT] sampled {len(strategies)} strategy candidates")
+        best_strategy = (
+            strategies[self._vote_best(task_ctx, question, strategies, "strategy", log)]
+            if strategies else ""
+        )
+
+        # ── Level 2: full solutions following the chosen strategy ──
+        solutions = self._sample_n(
+            SOLUTION_PROMPT.format(
+                task_ctx=task_ctx, question=question, strategy=best_strategy,
+            ),
+            k, propose_temp,
+        )
+        log.append(f"[plan-ToT] sampled {len(solutions)} solution candidates")
+        best_solution = (
+            solutions[self._vote_best(task_ctx, question, solutions, "solution", log)]
+            if solutions else best_strategy
+        )
+
+        # ── Finalize: clean answer extraction from the winning solution ──
+        final_answer = self._finalize_answer(question, best_solution, task_ctx)
+        return final_answer, best_strategy, best_solution, log
+
+    # ══════════════════════════════════════════
     #  Public interface
     # ══════════════════════════════════════════
 
@@ -562,24 +740,54 @@ class ToT(BaseBaseline):
         # Use a local variable so self.propose_temperature is never mutated.
         propose_temp = temperature if temperature > 0.0 else self.propose_temperature
 
-        # Build the root node
+        # Decide the task family.  Game of 24 (four bare integers, default
+        # prompts) uses the fragment-tree search; every other task uses the
+        # generic plan-level ToT, whose voting comparison gives a real search
+        # signal where the per-state sure/likely/impossible evaluator cannot.
+        is_non_game_of_24 = (
+            bool(system_prompt or instruction)
+            and self.propose_prompt is PROPOSE_PROMPT
+            and not _GAME_OF_24_RE.match(question.strip())
+        )
+
+        # ── Plan-level ToT path (generic tasks) ──
+        if is_non_game_of_24:
+            task_ctx = "\n\n".join(p for p in [system_prompt, instruction] if p)
+            final_answer, best_strategy, best_solution, search_log = (
+                self._plan_level_solve(question, task_ctx, propose_temp)
+            )
+            reasoning_trace = (
+                "[ToT — plan-level BFS]\n"
+                f"  Strategy: {best_strategy}\n"
+                f"  Solution: {best_solution}"
+            )
+            return self.create_response(
+                final_answer=final_answer,
+                reasoning_trace=reasoning_trace,
+                intermediate_steps=search_log,
+                metadata={
+                    "search_algorithm":    "plan-level",
+                    "n_generate_sample":   self.n_generate_sample,
+                    "n_evaluate_sample":   self.n_evaluate_sample,
+                    "breadth_limit":       self.breadth_limit,
+                    "max_steps":           self.max_steps,
+                    "value_threshold":     self.value_threshold,
+                    "propose_temperature": propose_temp,
+                    "value_temperature":   self.value_temperature,
+                    "best_path":           [best_strategy, best_solution],
+                    "best_node_state":     None,
+                    "best_node_score":     None,
+                    "best_strategy":       best_strategy,
+                    "best_solution":       best_solution,
+                },
+            )
+
+        # ── Game-of-24 fragment-tree path ──
+        # _task_context = None keeps generate_thoughts()/evaluate_state()/
+        # extract_remaining() on their Game-of-24 branches.
+        self._task_context = None
         root = ThoughtNode(state=question.strip(), depth=0)
 
-        # When running on a non-Game of 24 task (detected by the question not
-        # being four bare integers), store the benchmark's task context so that
-        # generate_thoughts() and evaluate_state() can build task-appropriate
-        # prompts instead of the hardcoded Game of 24 ones.
-        if (system_prompt or instruction) and self.propose_prompt is PROPOSE_PROMPT:
-            if not _GAME_OF_24_RE.match(question.strip()):
-                self._task_context: Optional[str] = "\n\n".join(
-                    p for p in [system_prompt, instruction] if p
-                )
-            else:
-                self._task_context = None
-        else:
-            self._task_context = None
-
-        # ── Search ──────────────────────────
         # Temporarily swap temperature so generate_thoughts picks it up,
         # then restore the original value afterwards.
         _orig_propose_temp = self.propose_temperature
@@ -591,7 +799,6 @@ class ToT(BaseBaseline):
                 best_node, search_log = self.bfs(root)
         finally:
             self.propose_temperature = _orig_propose_temp
-            self._task_context = None
 
         # ── Answer extraction ────────────────
         final_answer = self.extract_final_answer(
