@@ -430,8 +430,9 @@ def got_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("GoT")
     g.add_argument("--got_branches", type=int, default=3,
                    help="Number of branches to explore at each step")
-    g.add_argument("--got_keep", type=int, default=1,
-                   help="Number of branches to keep after each refinement round")
+    g.add_argument("--got_keep", type=int, default=2,
+                   help="Number of top-scored branches to keep for aggregation "
+                        "(must be >= 2 for the Aggregate step to run)")
     g.add_argument("--got_refine", type=int, default=2,
                    help="Number of refinement rounds to perform")
     g.add_argument("--got_gen_temp", type=float, default=0.7,

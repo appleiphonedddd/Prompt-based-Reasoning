@@ -367,20 +367,26 @@ class GoT(BaseBaseline):
         """
         Parse a floating-point score from the LLM reply.
 
-        Accepts values in [0, 1]; handles two common model behaviours:
-          - Decimal in [0, 1]   → used as-is, then clamped.
-          - Integer in [2, 10]  → rescaled from a 0-10 scale (÷ 10).
-          - Decimal > 1 (e.g. 1.5) → treated as out-of-range decimal, clamped to 1.0.
-          - No number found     → defaults to 0.0 with a warning.
+        Normalises everything onto [0, 1]:
+          - Explicit fraction "x/y" (e.g. "8.5/10") → x / y.
+          - Bare value in [0, 1]                    → used as-is.
+          - Bare value > 1 (e.g. "7", "8.5", "10")  → rescaled from a 0-10 scale (÷ 10).
+          - No number found                         → defaults to 0.0 with a warning.
+        The final result is always clamped to [0, 1].
         """
+        # Prefer an explicit "x / y" rating (e.g. "8.5/10") when present.
+        frac = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", raw)
+        if frac and float(frac.group(2)) != 0.0:
+            value = float(frac.group(1)) / float(frac.group(2))
+            return max(0.0, min(1.0, value))
+
         numbers = re.findall(r"\d+(?:\.\d+)?", raw)
         if not numbers:
             logger.warning("Could not parse score from: %r – defaulting to 0.0", raw)
             return 0.0
         value = float(numbers[0])
-        # Only rescale if the value is a whole number on a 0-10 scale (≥ 2).
-        # A decimal like 1.5 is treated as an out-of-range [0,1] score and clamped.
-        if value >= 2.0 and value == int(value):
+        # Any value above 1 is assumed to be on a 0-10 scale (handles "7", "8.5", "3.0").
+        if value > 1.0:
             value = value / 10.0
         return max(0.0, min(1.0, value))
 
