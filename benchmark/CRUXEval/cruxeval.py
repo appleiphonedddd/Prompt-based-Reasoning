@@ -400,3 +400,15 @@ class CRUXEval(DatasetBase):
             "just the value."
         )
 
+    def _demo_output(self, problem) -> Optional[str]:
+        """Render the expected return value for an RoT demonstration.
+
+        CRUXEval ground truth is a dict; the demonstration output is the
+        ``expected_output`` literal. The default :meth:`get_demonstrations`
+        derivation (Input = question, Output = this value) then applies.
+        """
+        gt = problem.ground_truth
+        if isinstance(gt, dict) and gt.get("expected_output") is not None:
+            return str(gt["expected_output"])
+        return None
+

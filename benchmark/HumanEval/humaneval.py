@@ -470,3 +470,25 @@ class HumanEval(DatasetBase):
             "Output only the function body code — do not include the function signature, "
             "docstring, or any explanation."
         )
+
+    def get_demonstrations(self, n_shot: int = 1) -> str:
+        """Hand-crafted HumanEval demonstration for RoT warm-up.
+
+        The ground truth holds the hidden test suite, not a reference body, so
+        the demonstration is one canonical worked example: a signature with a
+        docstring as input and the function body (only) as output, matching
+        the task's required answer style.
+        """
+        return (
+            "Input:\n"
+            "from typing import List\n\n"
+            "def has_close_elements(numbers: List[float], threshold: float) -> bool:\n"
+            '    """ Check if in a given list of numbers, any two are closer to '
+            'each other than the given threshold. """\n'
+            "Output:\n"
+            "    for i in range(len(numbers)):\n"
+            "        for j in range(i + 1, len(numbers)):\n"
+            "            if abs(numbers[i] - numbers[j]) < threshold:\n"
+            "                return True\n"
+            "    return False"
+        )

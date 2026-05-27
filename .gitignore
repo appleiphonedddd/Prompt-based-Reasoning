@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# BoT meta-buffer dumps (only written when --buffer_path is set explicitly)
+meta_buffer.json
+*meta_buffer*.json
+
 # C extensions
 *.so
 

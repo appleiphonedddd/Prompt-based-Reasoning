@@ -300,3 +300,17 @@ class GameOf24(DatasetBase):
             "You are an expert mathematical puzzle solver. "
             "Respond with a single arithmetic expression only."
         )
+
+    def get_demonstrations(self, n_shot: int = 2) -> str:
+        """Hand-crafted Game-of-24 demonstrations for RoT warm-up.
+
+        The dataset ground truth holds only the four numbers, not a solution
+        expression, so demonstrations are canonical worked examples (the
+        output is the arithmetic expression the task expects), matching the
+        official RoT release and the paper's Game-of-24 case study.
+        """
+        demos = [
+            "Input: 1 5 5 5\nOutput: 5 * (5 - 1 / 5) = 24",
+            "Input: 3 3 8 8\nOutput: 8 / (3 - 8 / 3) = 24",
+        ]
+        return "\n\n".join(demos[: max(1, n_shot)])

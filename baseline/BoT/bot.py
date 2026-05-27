@@ -41,8 +41,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -65,6 +67,98 @@ def _embed(text: str) -> np.ndarray:
 def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     # Vectors are already L2-normalised, so dot product == cosine similarity.
     return float(np.dot(a, b))
+
+
+# Matches the "### Distilled Task" section emitted by PROBLEM_DISTILLER_SYSTEM,
+# capturing everything up to the next "###" header (or end of text).
+_DISTILLED_TASK_RE = re.compile(
+    r"#+[ \t]*Distilled[ \t]+Task[ \t]*:?[ \t]*\n(.*?)(?=\n#+[ \t]|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def extract_distilled_task(distilled_info: str) -> str:
+    """Return only the concise '### Distilled Task' paragraph for retrieval.
+
+    Template retrieval (Eq. 2 of the paper) compares the distilled problem
+    against terse template *descriptions*. Embedding the full multi-section
+    distiller output (Key Information + Constraints + Distilled Task) dilutes
+    the semantic signal and depresses cosine similarity, which makes the
+    meta-buffer fire far less often than intended. Isolating the short task
+    paragraph keeps the query in the same register as the stored descriptions.
+
+    Falls back to the full text when the section is absent (e.g. the model did
+    not follow the expected format).
+    """
+    m = _DISTILLED_TASK_RE.search(distilled_info)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return distilled_info.strip()
+
+
+# ── Code extraction & execution ─────────────────────────────────────────────
+# BoT's headline advantage on Game-of-24 / programming / chess tasks comes from
+# *executing* the instantiated code template rather than reasoning about it in
+# prose (paper §4.1). This is opt-in (BoT(execute_code=True)) because it runs
+# untrusted, model-generated Python — only enable it on a trusted/sandboxed host.
+
+_CODE_BLOCK_RE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def extract_code(text: str) -> Optional[str]:
+    """Return the Python source from a markdown ```python ... ``` block.
+
+    When several fenced blocks are present the longest one is chosen (the full
+    program rather than a snippet). Returns None when no fenced code is found,
+    so callers can cleanly fall back to textual answer extraction.
+    """
+    blocks = [b.strip() for b in _CODE_BLOCK_RE.findall(text) if b.strip()]
+    if not blocks:
+        return None
+    return max(blocks, key=len)
+
+
+@dataclass
+class CodeExecutionResult:
+    """Outcome of running a generated program in a subprocess."""
+    success: bool
+    output: str   # stdout, stripped
+    error: str    # stderr / exception / timeout message
+    code: str     # the source that was executed
+
+
+def run_code(code: str, timeout: float = 10.0) -> CodeExecutionResult:
+    """Execute Python ``code`` in an isolated subprocess and capture stdout.
+
+    Running in a separate interpreter (rather than inline ``exec``) means
+    infinite loops are bounded by ``timeout`` (e.g. a brute-force Game-of-24
+    search), crashes / ``sys.exit`` cannot take down the harness, and the
+    namespace stays clean. ``-I`` (isolated mode) ignores PYTHON* env vars and
+    the user site directory while still exposing installed packages such as
+    ``chess`` or ``itertools``.
+
+    A run counts as failed if it raises, exits non-zero, times out, or prints
+    nothing (a program that computes but never prints has no usable answer).
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-I", "-c", code],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return CodeExecutionResult(False, "", f"Execution timed out after {timeout:g}s", code)
+    except Exception as exc:  # pragma: no cover - interpreter launch failure
+        return CodeExecutionResult(False, "", f"Failed to launch interpreter: {exc}", code)
+
+    stdout = proc.stdout.strip()
+    if proc.returncode != 0:
+        error = proc.stderr.strip() or f"Process exited with code {proc.returncode}"
+        return CodeExecutionResult(False, stdout, error, code)
+    if not stdout:
+        return CodeExecutionResult(
+            False, "", "Code ran without error but printed nothing to stdout.", code
+        )
+    return CodeExecutionResult(True, stdout, "", code)
 
 
 THOUGHT_CATEGORIES = [
@@ -345,7 +439,7 @@ class MetaBuffer:
     def size(self) -> int:
         return len(self.buffer)
 
-    def retrieve(self, distilled_info: str, threshold: float = 0.6) -> Optional[ThoughtTemplate]:
+    def retrieve(self, distilled_info: str, threshold: float = 0.5) -> Optional[ThoughtTemplate]:
         if not self.buffer:
             return None
         query_emb = _embed(distilled_info)
@@ -353,7 +447,7 @@ class MetaBuffer:
         best_idx = int(np.argmax(scores))
         return self.buffer[best_idx] if scores[best_idx] >= threshold else None
 
-    def add(self, template: ThoughtTemplate, threshold: float = 0.6) -> bool:
+    def add(self, template: ThoughtTemplate, threshold: float = 0.5) -> bool:
         new_emb = _embed(template.description)
         if self.buffer:
             max_sim = max(_cosine_sim(new_emb, e) for e in self._embeddings)
@@ -434,18 +528,56 @@ You are a Meta Reasoner with deep expertise across Computer Science, Mathematics
 Physics, Literature, History, Chemistry, Logic, and Language.
 
 You will be given a distilled problem description for a task that has no prior \
-reasoning template.
+reasoning template. First choose ONE of the following three general reasoning \
+structures that best fits the problem:
+
+  i)   Prompt-based structure   — best for Common Sense Reasoning and Application
+       Scheduling tasks.
+  ii)  Procedure-based structure — best for creative tasks such as Creative
+       Language Generation and Text Comprehension.
+  iii) Programming-based structure — best for Mathematical Reasoning and Code
+       Programming; it can also transform a real-world problem into a program
+       that is solved efficiently.
 
 Format your final answer as:
 ### Reasoning Structure Chosen
-<one of the three above>
+<one of: Prompt-based, Procedure-based, Programming-based>
 
 ### Reasoning
-<step-by-step reasoning>
+<step-by-step reasoning following the chosen structure>
 
 ### Answer
 <concise final answer>
 """
+
+# Categories whose templates are code-bearing; when execute_code is on we ask the
+# instantiation step to emit a runnable program for these.
+CODE_CATEGORIES = {"Code Programming", "Application Scheduling", "Mathematical Reasoning"}
+
+# Appended to the instantiation prompt (code-category template hit) when
+# execute_code is enabled, so the model emits a program we can actually run.
+CODE_EXECUTION_DIRECTIVE = """
+
+IMPORTANT — your solution will be executed automatically. Implement it as a \
+COMPLETE, self-contained Python program that computes the answer and prints ONLY \
+the final answer to stdout. Put the entire program in a single ```python ... ``` \
+code block. Do not print explanations."""
+
+# Softer variant for the new-task path, conditioned on the model's own choice of
+# the Programming-based structure.
+NEW_TASK_CODE_DIRECTIVE = """
+
+If you choose the Programming-based structure, implement the solution as a \
+COMPLETE, self-contained Python program that prints ONLY the final answer to \
+stdout, wrapped in a single ```python ... ``` code block — it will be executed."""
+
+INSPECTOR_SYSTEM = """\
+You are a meticulous Python debugger. The program below was written to solve a \
+problem but failed when executed. Using the code and the execution error, return a \
+corrected, COMPLETE Python program that runs without errors and prints ONLY the \
+final answer to stdout.
+
+Return ONLY the corrected program inside a single ```python ... ``` code block."""
 
 
 class BufferManager:
@@ -453,7 +585,7 @@ class BufferManager:
         self,
         meta_buffer: MetaBuffer,
         llm: BaseLLM,
-        similarity_threshold: float = 0.6,
+        similarity_threshold: float = 0.5,
         distill_temperature: float = 0.2,
     ) -> None:
         self.meta_buffer = meta_buffer
@@ -516,18 +648,26 @@ class BoT(BaseBaseline):
     def __init__(
         self,
         llm: BaseLLM,
-        similarity_threshold: float = 0.6,
+        similarity_threshold: float = 0.5,
         buffer_path: Optional[str] = None,
         distill_temperature: float = 0.2,
         instantiation_temperature: float = 0.1,
         update_buffer: bool = True,
         init_templates: Optional[List[ThoughtTemplate]] = None,
+        execute_code: bool = False,
+        max_code_repairs: int = 3,
+        code_timeout: float = 10.0,
     ) -> None:
         super().__init__(llm, baseline_name="BoT")
         self.similarity_threshold = similarity_threshold
         self.distill_temperature = distill_temperature
         self.instantiation_temperature = instantiation_temperature
         self.update_buffer = update_buffer
+        # Code execution (paper §4.1) — runs untrusted model-generated Python, so
+        # it is OFF by default; enable only on a trusted/sandboxed host.
+        self.execute_code = execute_code
+        self.max_code_repairs = max_code_repairs
+        self.code_timeout = code_timeout
         # Fall back to paper's seed templates when the buffer would otherwise be empty.
         effective_init = init_templates
         if effective_init is None and not (buffer_path and os.path.isfile(buffer_path)):
@@ -550,7 +690,11 @@ class BoT(BaseBaseline):
     # ── Stage 2 ───────────────────────────────────────────────────────────────
 
     def retrieve_template(self, distilled_info: str) -> Optional[ThoughtTemplate]:
-        return self.meta_buffer.retrieve(distilled_info, threshold=self.similarity_threshold)
+        # Query on the concise distilled-task paragraph, not the whole verbose
+        # distiller dump — the latter dilutes embedding similarity and suppresses
+        # legitimate template hits.
+        query = extract_distilled_task(distilled_info)
+        return self.meta_buffer.retrieve(query, threshold=self.similarity_threshold)
 
     # ── Stage 3 ───────────────────────────────────────────────────────────────
 
@@ -562,8 +706,13 @@ class BoT(BaseBaseline):
             f"\nSolution Description:\n{template.solution_description}\n"
             if template.solution_description else ""
         )
+        code_directive = (
+            CODE_EXECUTION_DIRECTIVE
+            if self.execute_code and template.category in CODE_CATEGORIES
+            else ""
+        )
         prompt = (
-            f"{INSTANTIATION_SYSTEM}\n\n"
+            f"{INSTANTIATION_SYSTEM}{code_directive}\n\n"
             f"{role_line}"
             f"[Distilled Problem]\n{distilled_info}\n\n"
             f"[Thought Template — {template.category}]\n"
@@ -575,7 +724,8 @@ class BoT(BaseBaseline):
 
     def instantiate_new_task(self, distilled_info: str, system_prompt: Optional[str] = None) -> str:
         role_line = f"[Role]\n{system_prompt}\n\n" if system_prompt else ""
-        prompt = f"{NEW_TASK_SYSTEM}\n\n{role_line}[Distilled Problem]\n{distilled_info}"
+        code_directive = NEW_TASK_CODE_DIRECTIVE if self.execute_code else ""
+        prompt = f"{NEW_TASK_SYSTEM}{code_directive}\n\n{role_line}[Distilled Problem]\n{distilled_info}"
         return self.call_llm(prompt, temperature=self.instantiation_temperature).content.strip()
 
     # ── Answer extraction ─────────────────────────────────────────────────────
@@ -587,6 +737,38 @@ class BoT(BaseBaseline):
             return m.group(1).strip()
         lines = [ln.strip() for ln in raw_response.split("\n") if ln.strip()]
         return lines[-1] if lines else raw_response.strip()
+
+    # ── Code execution + inspector repair loop ──────────────────────────────────
+
+    def execute_solution(
+        self, raw_solution: str, system_prompt: Optional[str] = None
+    ) -> Optional[CodeExecutionResult]:
+        """Extract and run the program in ``raw_solution``, repairing on failure.
+
+        Returns None when the solution contains no fenced code (so the caller
+        falls back to textual answer extraction). On a failed run the inspector
+        prompt feeds the code + error back to the LLM, up to ``max_code_repairs``
+        times (paper §4.1). All LLM calls go through ``call_llm`` for accounting.
+        """
+        code = extract_code(raw_solution)
+        if code is None:
+            return None
+
+        result = run_code(code, timeout=self.code_timeout)
+        attempts = 0
+        while not result.success and attempts < self.max_code_repairs:
+            attempts += 1
+            role_line = f"[Role]\n{system_prompt}\n\n" if system_prompt else ""
+            prompt = (
+                f"{INSPECTOR_SYSTEM}\n\n"
+                f"{role_line}"
+                f"[Code]\n```python\n{result.code}\n```\n\n"
+                f"[Execution Error]\n{result.error}"
+            )
+            fixed = self.call_llm(prompt, temperature=self.instantiation_temperature).content
+            new_code = extract_code(fixed) or fixed.strip()
+            result = run_code(new_code, timeout=self.code_timeout)
+        return result
 
     # ── run() ─────────────────────────────────────────────────────────────────
 
@@ -626,6 +808,21 @@ class BoT(BaseBaseline):
         )
         intermediate_steps.append(f"[Stage 3: Instantiated Reasoning]\n{raw_solution}")
         final_answer = self.extract_answer(raw_solution)
+
+        # ── Stage 3b: optional code execution (paper §4.1) ──────────────────
+        code_attempted = False
+        code_success: Optional[bool] = None
+        if self.execute_code:
+            exec_result = self.execute_solution(raw_solution, system_prompt=system_prompt)
+            if exec_result is not None:
+                code_attempted = True
+                code_success = exec_result.success
+                if exec_result.success:
+                    final_answer = exec_result.output
+                intermediate_steps.append(
+                    f"[Stage 3b: Code Execution] success={exec_result.success}\n"
+                    f"output={exec_result.output!r}\nerror={exec_result.error!r}"
+                )
 
         new_template: Optional[ThoughtTemplate] = None
         if self.update_buffer:
@@ -676,6 +873,9 @@ class BoT(BaseBaseline):
                 "instantiation_temperature": self.instantiation_temperature,
                 "distill_temperature": self.distill_temperature,
                 "update_buffer": self.update_buffer,
+                "execute_code": self.execute_code,
+                "code_executed": code_attempted,
+                "code_execution_success": code_success,
             },
         )
 
@@ -685,5 +885,6 @@ class BoT(BaseBaseline):
             f"llm={self.llm.__class__.__name__}, "
             f"similarity_threshold={self.similarity_threshold}, "
             f"meta_buffer_size={self.meta_buffer.size}, "
-            f"update_buffer={self.update_buffer})"
+            f"update_buffer={self.update_buffer}, "
+            f"execute_code={self.execute_code})"
         )

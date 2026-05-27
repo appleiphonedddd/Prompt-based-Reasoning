@@ -662,3 +662,19 @@ class APPS(DatasetBase):
             "Read from standard input with input() and write to standard output with print(). "
             "Output only the Python code."
         )
+
+    def get_demonstrations(self, n_shot: int = 1) -> str:
+        """Hand-crafted APPS demonstration for RoT warm-up.
+
+        The ground truth holds the hidden I/O test cases, not a reference
+        program, so the demonstration is one canonical worked example: a
+        problem statement as input and a complete stdin/stdout program as
+        output, matching the task's required answer style.
+        """
+        return (
+            "Input: Read two integers A and B on a single line separated by a "
+            "space and print their sum.\n"
+            "Output:\n"
+            "a, b = map(int, input().split())\n"
+            "print(a + b)"
+        )

@@ -164,6 +164,69 @@ class DatasetBase(ABC):
         """
         return None
 
+    def get_demonstrations(self, n_shot: int = 2) -> Optional[str]:
+        """Return input-output demonstrations for RoT reverse-reasoning warm-up.
+
+        Reversal of Thought (RoT) reverse-engineers the task definition from a
+        small set of input-output examples ``D`` (the paper uses 1- or 2-shot).
+        This hook supplies those examples, formatted as one block per shot::
+
+            Input: <question>
+            Output: <expected output>
+
+        (blocks separated by a blank line).
+
+        The default implementation derives demonstrations from the first
+        ``n_shot`` loaded problems, rendering each expected output via
+        :meth:`_demo_output`. It is well-suited to tasks whose ground truth is
+        a clean scalar/string answer (e.g. MGSM, BIG-Bench Hard). Datasets
+        whose ground truth is *not* the literal expected output (e.g. Game of
+        24, code-generation tasks) should override this method with
+        hand-crafted canonical demonstrations.
+
+        Args:
+            n_shot: Number of demonstration examples to include.
+
+        Returns:
+            A formatted demonstration string, or ``None`` when no
+            demonstrations can be produced (RoT then warms up without
+            grounding examples).
+        """
+        if self._data is None or len(self) == 0 or n_shot < 1:
+            return None
+
+        blocks: List[str] = []
+        for i in range(min(n_shot, len(self))):
+            problem = self.get_problem(i)
+            output = self._demo_output(problem)
+            if output is None:
+                # Cannot derive a clean output — subclass should override.
+                return None
+            blocks.append(f"Input: {problem.question}\nOutput: {output}")
+
+        return "\n\n".join(blocks) if blocks else None
+
+    def _demo_output(self, problem: "Problem") -> Optional[str]:
+        """Render a problem's expected output for a demonstration block.
+
+        Default: stringify scalar/string ground truths. Returns ``None`` for
+        structured ground truths (dicts, lists, …), signalling that the
+        dataset should override :meth:`get_demonstrations` with hand-crafted
+        examples instead of relying on the default derivation.
+
+        Args:
+            problem: The problem whose output should be rendered.
+
+        Returns:
+            The output string, or ``None`` if it cannot be derived cleanly.
+        """
+        gt = problem.ground_truth
+        if isinstance(gt, bool):  # bool is an int subclass — keep as True/False
+            return str(gt)
+        if isinstance(gt, (str, int, float)):
+            return str(gt)
+        return None
+
 
     def __len__(self) -> int:
         """Return the number of problems in the loaded split.

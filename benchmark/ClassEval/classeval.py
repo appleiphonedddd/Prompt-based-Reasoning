@@ -474,3 +474,26 @@ class ClassEval(DatasetBase):
             "Write clean, correct Python that satisfies all constraints described in the docstrings. "
             "Output only the complete class implementation with all imports — no explanations."
         )
+
+    def get_demonstrations(self, n_shot: int = 1) -> str:
+        """Hand-crafted ClassEval demonstration for RoT warm-up.
+
+        The ground truth holds the hidden unittest suite, not a reference
+        implementation, so the demonstration is one canonical worked example:
+        a class skeleton as input and the complete class implementation as
+        output, matching the task's required answer style.
+        """
+        return (
+            "Input:\n"
+            "class Calculator:\n"
+            '    """A simple calculator."""\n'
+            "    def add(self, a, b):\n"
+            '        """Return the sum of a and b."""\n'
+            "        pass\n"
+            "Output:\n"
+            "class Calculator:\n"
+            '    """A simple calculator."""\n'
+            "    def add(self, a, b):\n"
+            '        """Return the sum of a and b."""\n'
+            "        return a + b"
+        )

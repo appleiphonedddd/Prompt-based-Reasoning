@@ -70,6 +70,9 @@ BASELINE_REGISTRY: dict[str, tuple] = {
         distill_temperature=a.bot_distill_temp,
         instantiation_temperature=a.bot_instantiate_temp,
         update_buffer=a.update_buffer,
+        execute_code=a.bot_execute_code,
+        max_code_repairs=a.bot_max_repairs,
+        code_timeout=a.bot_code_timeout,
     )),
     "got": (GoT, lambda a: dict(
         num_branches=a.got_branches,
@@ -117,6 +120,8 @@ class Evaluator:
         if self.args.baseline.lower() == "rot" and dataset is not None:
             parts = [p for p in [dataset.get_system_prompt(), dataset.get_instruction()] if p]
             kwargs["task_prompt"] = "\n".join(parts)
+            # Input-output demonstrations D for the reverse-reasoning warm-up.
+            kwargs["demos"] = dataset.get_demonstrations(n_shot=self.args.rot_n_shot)
         return cls(llm=client, **kwargs)
 
     def build_dataset(self):
@@ -382,6 +387,9 @@ def rot_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("RoT")
     g.add_argument("--warmup", type=int, default=5,
                    help="Number of reverse-reasoning candidates K")
+    g.add_argument("--rot_n_shot", type=int, default=2,
+                   help="Number of input-output demonstrations D for the "
+                        "reverse-reasoning warm-up (paper uses 1 or 2)")
     g.add_argument("--candidate_temperature", type=float, default=0.7,
                    help="Sampling temperature for candidate generation")
     g.add_argument("--instantiation_temperature", type=float, default=0.1,
@@ -414,16 +422,32 @@ def tot_args(parser: argparse.ArgumentParser) -> None:
 
 def bot_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("BoT")
-    g.add_argument("--bot_threshold", type=float, default=0.6,
-                   help="Similarity threshold (δ) for template retrieval and updates")
-    g.add_argument("--buffer_path", default="meta_buffer.json",
-                   help="Path to the JSON file for storing/loading thought-templates")
+    g.add_argument("--bot_threshold", type=float, default=0.5,
+                   help="Similarity threshold (δ) for template retrieval and novelty "
+                        "updates (paper recommends 0.5–0.7). Lower = retrieve seeds "
+                        "more readily on the first question; higher = grow the buffer faster.")
+    g.add_argument("--buffer_path", default=None,
+                   help="Path to a JSON file for persisting thought-templates on disk. "
+                        "Default: None (in-memory only) — the meta-buffer is seeded fresh "
+                        "from the paper's templates at the start of every run, so runs stay "
+                        "independent and reproducible and no state leaks across models / "
+                        "benchmarks / repeats. Pass an explicit path ONLY if you want the "
+                        "buffer to accumulate and persist across runs.")
     g.add_argument("--bot_distill_temp", type=float, default=0.2,
                    help="Temperature for problem distillation and template extraction")
     g.add_argument("--bot_instantiate_temp", type=float, default=0.1,
                    help="Temperature for final reasoning instantiation")
     g.add_argument("--no_update_buffer", action="store_false", dest="update_buffer",
                    help="Disable automatic buffer updating after solving")
+    g.add_argument("--bot_execute_code", action="store_true", dest="bot_execute_code",
+                   help="Execute the instantiated Python program and use its stdout as the "
+                        "answer (paper §4.1; drives the Game-of-24 / programming / chess "
+                        "results). WARNING: runs untrusted model-generated code in a "
+                        "timeout-bounded subprocess — enable only on a trusted host. Default: off.")
+    g.add_argument("--bot_max_repairs", type=int, default=3,
+                   help="Max inspector repair attempts when executed code errors (default: 3)")
+    g.add_argument("--bot_code_timeout", type=float, default=10.0,
+                   help="Per-execution timeout in seconds for generated code (default: 10)")
 
 
 def got_args(parser: argparse.ArgumentParser) -> None:

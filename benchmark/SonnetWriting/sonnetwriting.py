@@ -380,3 +380,32 @@ class SonnetWriting(DatasetBase):
             "English sonnet form with precision and artistic merit. "
             "Always honor the structural constraints given."
         )
+
+    def get_demonstrations(self, n_shot: int = 1) -> str:
+        """Hand-crafted sonnet demonstration for RoT warm-up.
+
+        The ground truth holds only the required words, not a finished poem,
+        so the demonstration is one canonical worked example: an input that
+        names the verbatim words and an output that is a complete 14-line
+        sonnet in ABAB CDCD EFEF GG form containing all of them. A single
+        shot is used because each example is a full poem.
+        """
+        return (
+            'Input: Write a Shakespearean sonnet (ABAB CDCD EFEF GG) using '
+            'these 3 words verbatim: "moon", "river", "silent"\n'
+            "Output:\n"
+            "Beneath the pale and ever-watchful moon,\n"
+            "The quiet waters of the river gleam,\n"
+            "And night unfolds her dark and tender boon,\n"
+            "While silent shadows drift as in a dream.\n"
+            "The willows bend to kiss the cooling tide,\n"
+            "Their branches tracing letters on the stream,\n"
+            "As secrets in the rippling current hide,\n"
+            "And starlight scatters many a fragile beam.\n"
+            "No voice disturbs the stillness of the hour,\n"
+            "The world has hushed its restless, daily strife,\n"
+            "And every leaf submits to slumber's power,\n"
+            "Surrendering the noise of waking life.\n"
+            "So let me linger here till break of day,\n"
+            "Where moon and silent river softly stay."
+        )

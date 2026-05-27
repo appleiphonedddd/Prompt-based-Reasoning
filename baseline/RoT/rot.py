@@ -271,6 +271,10 @@ class RoT(BaseBaseline):
         self._cached_llm_taste: Optional[str] = None
         self._cached_optimal_idx: int = 0
         self._cached_pref_scores: Dict[str, float] = {}
+        # Cached Stage 3 (CPM) results, keyed by effective task prompt. CPM only
+        # depends on (task_prompt, llm_taste); llm_taste is itself cached above
+        # and constant per instance, so the task prompt alone is a safe key.
+        self._cached_cpm: Dict[str, Tuple[str, str, float]] = {}
 
     # ──────────────────────────────────────────
     # Stage 1: Reverse Reasoning Warm-up
@@ -687,13 +691,24 @@ class RoT(BaseBaseline):
         cpm_similarity = None
 
         if self.embedding_model is not None and effective_task_prompt is not None:
-            p_final, cpm_boundary, cpm_similarity = self._run_cpm(
-                effective_task_prompt, llm_taste
-            )
-            intermediate_steps.append(
-                f"[Stage 3: CPM] Boundary={cpm_boundary} "
-                f"(similarity={cpm_similarity:.4f}, δ={self.similarity_threshold})"
-            )
+            cached = self._cached_cpm.get(effective_task_prompt)
+            if cached is not None:
+                p_final, cpm_boundary, cpm_similarity = cached
+                intermediate_steps.append(
+                    f"[Stage 3: CPM] Boundary={cpm_boundary} "
+                    f"(similarity={cpm_similarity:.4f}, δ={self.similarity_threshold}) [cached]"
+                )
+            else:
+                p_final, cpm_boundary, cpm_similarity = self._run_cpm(
+                    effective_task_prompt, llm_taste
+                )
+                self._cached_cpm[effective_task_prompt] = (
+                    p_final, cpm_boundary, cpm_similarity
+                )
+                intermediate_steps.append(
+                    f"[Stage 3: CPM] Boundary={cpm_boundary} "
+                    f"(similarity={cpm_similarity:.4f}, δ={self.similarity_threshold})"
+                )
             intermediate_steps.append(f"[CPM P_final]\n{p_final}")
         else:
             # CPM disabled: use raw LLM-taste (equivalent to w/o CPM ablation)

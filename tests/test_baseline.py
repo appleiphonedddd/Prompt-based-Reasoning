@@ -10,13 +10,14 @@ class MockLLM(BaseLLM):
         super().__init__(api_key="dummy", model="mock-model")
         self.fixed_answer = fixed_answer
 
-    def generate(self, prompt: str, temperature: float = 0) -> LLMResponse:
+    def generate(self, prompt: str, temperature: float = 0, logprobs: bool = False) -> LLMResponse:
 
         return LLMResponse(
             content=self.fixed_answer,
             model_name="mock-model",
             input_tokens=10,
-            output_tokens=5
+            output_tokens=5,
+            avg_logprob=0.9 if logprobs else None,
         )
 
 class TestInputBaseline(unittest.TestCase):
@@ -93,18 +94,19 @@ class SequentialMockLLM(BaseLLM):
         self.responses = responses
         self.call_counter = 0
 
-    def generate(self, prompt: str, temperature: float = 0) -> LLMResponse:
+    def generate(self, prompt: str, temperature: float = 0, logprobs: bool = False) -> LLMResponse:
         if self.call_counter < len(self.responses):
             content = self.responses[self.call_counter]
             self.call_counter += 1
         else:
             content = ""
-            
+
         return LLMResponse(
             content=content,
             model_name="mock-model-seq",
             input_tokens=10,
-            output_tokens=10
+            output_tokens=10,
+            avg_logprob=0.9 if logprobs else None,
         )
 
 class TestZeroShotCoT(unittest.TestCase):

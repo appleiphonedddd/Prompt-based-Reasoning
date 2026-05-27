@@ -514,3 +514,18 @@ class ProgrammingPuzzles(DatasetBase):
             "Respond with only the Python literal answer — no explanations, "
             "no code blocks, no additional text."
         )
+
+    def get_demonstrations(self, n_shot: int = 1) -> str:
+        """Hand-crafted Programming Puzzles demonstration for RoT warm-up.
+
+        The ground truth holds the ``sat`` predicate and answer type rather
+        than a literal solution, so the demonstration is one canonical worked
+        example: a ``sat`` function as input and the Python literal that
+        satisfies it as output, matching the task's required answer style.
+        """
+        return (
+            "Input:\n"
+            "def sat(x: int):\n"
+            "    return x + 1 == 42\n"
+            "Output: 41"
+        )

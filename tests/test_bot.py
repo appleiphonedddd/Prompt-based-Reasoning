@@ -3,8 +3,8 @@ Unit tests for the Buffer of Thoughts (BoT) baseline.
 
 Test organisation
 ─────────────────
- 1.  TestTokenise                 — tokenise() helper (public, no underscore)
- 2.  TestCosineSimilarity         — cosine_similarity() helper (public)
+ 1.  TestEmbedding                — _embed() helper (SentenceTransformer backend)
+ 2.  TestCosineSim                — _cosine_sim() helper
  3.  TestThoughtTemplate          — dataclass round-trip
  4.  TestMetaBufferPublicAttrs    — buffer/buffer_path are plain public attrs
  5.  TestMetaBufferRetrieval      — retrieve()
@@ -37,14 +37,21 @@ import tempfile
 import unittest
 from typing import List
 
+import numpy as np
+
 from models.base import BaseLLM, LLMResponse
 from baseline.BoT.bot import (
     BoT,
     BufferManager,
     MetaBuffer,
     ThoughtTemplate,
-    cosine_similarity,        # public (no underscore)
-    tokenise,                 # public (no underscore)
+    _embed,                   # SentenceTransformer embedding backend
+    _cosine_sim,              # cosine similarity over embeddings
+    extract_distilled_task,   # isolates the '### Distilled Task' query for retrieval
+    extract_code,             # pulls a ```python``` block from a response
+    run_code,                 # executes generated code in a subprocess
+    CodeExecutionResult,
+    SEED_TEMPLATES,           # paper Appendix B.1 templates auto-loaded by default
     DISTILLATION_SYSTEM,
     PROBLEM_DISTILLER_SYSTEM,
     INSTANTIATION_SYSTEM,
@@ -67,7 +74,7 @@ class FixedMockLLM(BaseLLM):
         self.call_count = 0
         self.prompts_received: List[str] = []
 
-    def generate(self, prompt: str, temperature: float = 0) -> LLMResponse:
+    def generate(self, prompt: str, temperature: float = 0, logprobs: bool = False) -> LLMResponse:
         self.call_count += 1
         self.prompts_received.append(prompt)
         return LLMResponse(
@@ -89,7 +96,7 @@ class SequentialMockLLM(BaseLLM):
         self.call_count = 0
         self.prompts_received: List[str] = []
 
-    def generate(self, prompt: str, temperature: float = 0) -> LLMResponse:
+    def generate(self, prompt: str, temperature: float = 0, logprobs: bool = False) -> LLMResponse:
         content = self._responses[self.call_count] if self.call_count < len(self._responses) else ""
         self.call_count += 1
         self.prompts_received.append(prompt)
@@ -139,69 +146,104 @@ def _make_template(idx: int = 0, description: str = "quadratic equation solve di
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. tokenise (public name)
+# 1. _embed — SentenceTransformer embedding backend
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestTokenise(unittest.TestCase):
+class TestEmbedding(unittest.TestCase):
 
-    def test_frequency_counting(self):
-        result = tokenise("hello world hello")
-        self.assertEqual(result["hello"], 2)
-        self.assertEqual(result["world"], 1)
+    def test_returns_1d_float_array(self):
+        v = _embed("solve a quadratic equation")
+        self.assertIsInstance(v, np.ndarray)
+        self.assertEqual(v.ndim, 1)
+        self.assertGreater(v.shape[0], 0)
 
-    def test_lowercased(self):
-        result = tokenise("Hello WORLD")
-        self.assertIn("hello", result)
-        self.assertIn("world", result)
-        self.assertNotIn("Hello", result)
+    def test_l2_normalised(self):
+        # _embed normalises embeddings, so the L2 norm must be ~1.0.
+        v = _embed("any sentence here")
+        self.assertAlmostEqual(float(np.linalg.norm(v)), 1.0, places=4)
 
-    def test_non_alpha_stripped(self):
-        result = tokenise("x^2 + b*c = 0!")
-        for ch in ("^", "*", "=", "!"):
-            self.assertNotIn(ch, result)
-
-    def test_empty_string(self):
-        self.assertEqual(tokenise(""), {})
-
-    def test_values_are_ints(self):
-        for v in tokenise("a b c").values():
-            self.assertIsInstance(v, int)
-
-    def test_is_public_name(self):
-        from baseline.BoT.bot import tokenise as t  # noqa: F401
-        self.assertTrue(callable(t))
+    def test_deterministic(self):
+        a = _embed("chess board checkmate in one move")
+        b = _embed("chess board checkmate in one move")
+        self.assertTrue(np.allclose(a, b))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2. cosine_similarity (public name)
+# 2. _cosine_sim — cosine similarity over embeddings
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestCosineSimilarity(unittest.TestCase):
+class TestCosineSim(unittest.TestCase):
 
-    def test_identical_vectors(self):
-        bow = {"a": 1, "b": 2}
-        self.assertAlmostEqual(cosine_similarity(bow, bow), 1.0, places=5)
+    def test_identical_text_near_one(self):
+        v = _embed("solve quadratic equation discriminant roots")
+        self.assertAlmostEqual(_cosine_sim(v, v), 1.0, places=4)
 
-    def test_disjoint_vectors(self):
-        self.assertAlmostEqual(cosine_similarity({"a": 1}, {"b": 1}), 0.0, places=5)
+    def test_related_beats_unrelated(self):
+        query = _embed("solve a quadratic equation")
+        related = _embed("compute the roots of ax^2 + bx + c = 0")
+        unrelated = _embed("bake a chocolate cake with flour and sugar")
+        self.assertGreater(_cosine_sim(query, related), _cosine_sim(query, unrelated))
 
-    def test_empty_vector_returns_zero(self):
-        self.assertEqual(cosine_similarity({}, {"a": 1}), 0.0)
-        self.assertEqual(cosine_similarity({"a": 1}, {}), 0.0)
-
-    def test_partial_overlap_in_unit_range(self):
-        score = cosine_similarity({"x": 2, "y": 1}, {"x": 1, "z": 3})
-        self.assertGreater(score, 0.0)
+    def test_in_unit_range(self):
+        a = _embed("a list of numbers and arithmetic operations")
+        b = _embed("write a sonnet with a rhyme scheme")
+        score = _cosine_sim(a, b)
+        self.assertGreaterEqual(score, -1.0)
         self.assertLessEqual(score, 1.0)
 
     def test_symmetric(self):
-        a = {"x": 3, "y": 1}
-        b = {"x": 1, "y": 3, "z": 2}
-        self.assertAlmostEqual(cosine_similarity(a, b), cosine_similarity(b, a), places=10)
+        a = _embed("update the chess board state")
+        b = _embed("infer the date from a description")
+        self.assertAlmostEqual(_cosine_sim(a, b), _cosine_sim(b, a), places=6)
 
-    def test_is_public_name(self):
-        from baseline.BoT.bot import cosine_similarity as cs  # noqa: F401
-        self.assertTrue(callable(cs))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2b. extract_distilled_task — retrieval query isolation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestExtractDistilledTask(unittest.TestCase):
+
+    def test_returns_only_task_section(self):
+        out = extract_distilled_task(DISTILLED_INFO)
+        self.assertEqual(out, "Solve quadratic equation ax^2+bx+c=0.")
+        self.assertNotIn("Key Information", out)
+        self.assertNotIn("Constraints", out)
+
+    def test_stops_at_next_header(self):
+        text = (
+            "### Distilled Task\nCombine numbers to reach a target.\n\n"
+            "### Notes\nignore me"
+        )
+        self.assertEqual(extract_distilled_task(text), "Combine numbers to reach a target.")
+
+    def test_case_insensitive_header(self):
+        text = "### distilled task\nlower case header body"
+        self.assertEqual(extract_distilled_task(text), "lower case header body")
+
+    def test_fallback_to_full_text_when_absent(self):
+        text = "no headers at all, just a plain question about chess."
+        self.assertEqual(extract_distilled_task(text), text)
+
+    def test_fallback_when_section_empty(self):
+        text = "### Distilled Task\n\n### Constraints\n- something"
+        # Empty task body → fall back to the whole text rather than returning "".
+        self.assertEqual(extract_distilled_task(text), text.strip())
+
+    def test_isolated_query_improves_match_when_noise_is_offtopic(self):
+        # When the Key Information / Constraints sections are off-topic noise,
+        # embedding the whole dump drags similarity to the relevant description
+        # down; isolating the task paragraph recovers it. (Isolation is not a
+        # universal win — if the noise happens to share keywords it can help the
+        # full dump — but for off-topic noise it should clearly improve.)
+        full = (
+            "### Key Information\n- assorted trivia about weather, traffic and lunch\n"
+            "### Constraints\n- respond politely using complete sentences\n"
+            "### Distilled Task\nWrite a sonnet that follows a fixed rhyme scheme."
+        )
+        desc = _embed("Generate a sonnet following a rhyme scheme with required words.")
+        sim_full = _cosine_sim(_embed(full), desc)
+        sim_task = _cosine_sim(_embed(extract_distilled_task(full)), desc)
+        self.assertGreater(sim_task, sim_full)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -334,8 +376,11 @@ class TestMetaBufferAdd(unittest.TestCase):
 
     def test_sequential_indices(self):
         mb = MetaBuffer()
+        # High threshold (0.9) so the novelty gate admits all three distinct topics:
+        # under semantic embeddings unrelated texts still have a small positive
+        # similarity, so a low gate would wrongly reject them.
         for desc in ("apple orchard fruit", "chess piece board", "integral calculus derivative"):
-            mb.add(ThoughtTemplate(-1, "Common Sense Reasoning", desc, "T"), threshold=0.1)
+            mb.add(ThoughtTemplate(-1, "Common Sense Reasoning", desc, "T"), threshold=0.9)
         self.assertEqual([t.index for t in mb.buffer], [0, 1, 2])
 
     def test_all_templates_returns_copy(self):
@@ -356,9 +401,10 @@ class TestMetaBufferPersistence(unittest.TestCase):
             path = f.name
         try:
             mb1 = MetaBuffer(buffer_path=path)
-            mb1.add(_make_template(description="unique alpha topic entry"), threshold=0.1)
-            mb1.add(ThoughtTemplate(-1, "Code Programming", "sorting algorithms data", "T2"), threshold=0.1)
+            mb1.add(_make_template(description="unique alpha topic entry"), threshold=0.9)
+            mb1.add(ThoughtTemplate(-1, "Code Programming", "sorting algorithms data", "T2"), threshold=0.9)
             mb2 = MetaBuffer(buffer_path=path)
+            self.assertEqual(mb2.size, 2)
             self.assertEqual(mb2.size, mb1.size)
         finally:
             os.unlink(path)
@@ -551,7 +597,7 @@ class TestBoTInitialisation(unittest.TestCase):
     def test_default_values(self):
         bot = BoT(FixedMockLLM())
         self.assertEqual(bot.baseline_name, "BoT")
-        self.assertAlmostEqual(bot.similarity_threshold, 0.6)
+        self.assertAlmostEqual(bot.similarity_threshold, 0.5)
         self.assertAlmostEqual(bot.distill_temperature, 0.2)
         self.assertAlmostEqual(bot.instantiation_temperature, 0.1)
         self.assertTrue(bot.update_buffer)
@@ -579,8 +625,14 @@ class TestBoTInitialisation(unittest.TestCase):
         self.assertFalse(hasattr(bot, "_meta_buffer"))
         self.assertFalse(hasattr(bot, "_buffer_manager"))
 
-    def test_buffer_starts_empty(self):
-        self.assertEqual(BoT(FixedMockLLM()).meta_buffer.size, 0)
+    def test_default_seeds_paper_templates(self):
+        # With no buffer_path and no init_templates, BoT auto-loads the paper's
+        # Appendix B.1 thought-templates so retrieval has something to match from.
+        self.assertEqual(BoT(FixedMockLLM()).meta_buffer.size, len(SEED_TEMPLATES))
+
+    def test_empty_buffer_with_explicit_empty_init(self):
+        # Passing an explicit empty list opts out of the paper seeds.
+        self.assertEqual(BoT(FixedMockLLM(), init_templates=[]).meta_buffer.size, 0)
 
     def test_init_templates_seeded(self):
         templates = [_make_template(0, "prime sieve"), _make_template(1, "chess opening")]
@@ -627,7 +679,7 @@ class TestBoTPublicStageMethods(unittest.TestCase):
         self.assertEqual(bot.distil_problem("q"), "spaced")
 
     def test_retrieve_template_public(self):
-        bot = BoT(FixedMockLLM(), update_buffer=False)
+        bot = BoT(FixedMockLLM(), update_buffer=False, init_templates=[])
         self.assertIsNone(bot.retrieve_template("any query"))
         self.assertFalse(hasattr(bot, "_retrieve_template"))
 
@@ -690,8 +742,10 @@ class TestBoTPublicStageMethods(unittest.TestCase):
 class TestBoTRunNewTask(unittest.TestCase):
 
     def _make(self):
+        # Empty buffer (init_templates=[]) so the task is genuinely "new" and the
+        # paper seeds cannot accidentally match DISTILLED_INFO's quadratic topic.
         llm = SequentialMockLLM([DISTILLED_INFO, NEW_TASK_RESPONSE, DISTILLATION_JSON])
-        return BoT(llm, similarity_threshold=0.5, update_buffer=True), llm
+        return BoT(llm, similarity_threshold=0.5, update_buffer=True, init_templates=[]), llm
 
     def test_final_answer(self):
         bot, _ = self._make()
@@ -792,7 +846,7 @@ class TestBoTRunReadOnly(unittest.TestCase):
 
     def test_buffer_frozen(self):
         llm = SequentialMockLLM([DISTILLED_INFO, NEW_TASK_RESPONSE])
-        bot = BoT(llm, update_buffer=False)
+        bot = BoT(llm, update_buffer=False, init_templates=[])
         bot.run("Q")
         self.assertEqual(bot.meta_buffer.size, 0)
 
@@ -873,7 +927,8 @@ class TestBoTBufferGrowth(unittest.TestCase):
                         "description": "sonnet poem writing rhyme creative",
                         "template": "Step 1: pick theme"}),
         ]
-        bot = BoT(SequentialMockLLM(responses), similarity_threshold=0.5, update_buffer=True)
+        bot = BoT(SequentialMockLLM(responses), similarity_threshold=0.5,
+                  update_buffer=True, init_templates=[])
         bot.run("Q1")
         bot.run("Q2")
         self.assertEqual(bot.meta_buffer.size, 2)
@@ -885,7 +940,7 @@ class TestBoTBufferGrowth(unittest.TestCase):
         bot = BoT(
             SequentialMockLLM([DISTILLED_INFO, NEW_TASK_RESPONSE, d,
                                 DISTILLED_INFO, INSTANTIATION_RESPONSE, d]),
-            similarity_threshold=0.3, update_buffer=True,
+            similarity_threshold=0.3, update_buffer=True, init_templates=[],
         )
         bot.run("Q1 quadratic equation discriminant")
         bot.run("Q2 quadratic equation discriminant")
@@ -1074,6 +1129,129 @@ class TestBugRegressions(unittest.TestCase):
             self.assertEqual(bot.meta_buffer.size, 0)
         finally:
             os.unlink(path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 21. Code extraction
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestExtractCode(unittest.TestCase):
+
+    def test_extracts_fenced_python(self):
+        text = "Here is the program:\n```python\nprint('hi')\n```\nDone."
+        self.assertEqual(extract_code(text), "print('hi')")
+
+    def test_language_tag_optional(self):
+        self.assertEqual(extract_code("```\nx = 1\nprint(x)\n```"), "x = 1\nprint(x)")
+
+    def test_no_fence_returns_none(self):
+        self.assertIsNone(extract_code("just prose, no code at all"))
+
+    def test_picks_longest_block(self):
+        text = "```python\nprint(1)\n```\nand\n```python\na = 2\nb = 3\nprint(a + b)\n```"
+        self.assertEqual(extract_code(text), "a = 2\nb = 3\nprint(a + b)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 22. Code execution (real subprocess)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestRunCode(unittest.TestCase):
+
+    def test_successful_run_captures_stdout(self):
+        r = run_code("print(6 * 7)")
+        self.assertIsInstance(r, CodeExecutionResult)
+        self.assertTrue(r.success)
+        self.assertEqual(r.output, "42")
+        self.assertEqual(r.error, "")
+
+    def test_runtime_error_is_failure(self):
+        r = run_code("raise ValueError('boom')")
+        self.assertFalse(r.success)
+        self.assertIn("ValueError", r.error)
+
+    def test_no_output_is_failure(self):
+        r = run_code("x = 1 + 1")  # computes but never prints
+        self.assertFalse(r.success)
+
+    def test_timeout_is_failure(self):
+        r = run_code("while True:\n    pass", timeout=1.0)
+        self.assertFalse(r.success)
+        self.assertIn("timed out", r.error.lower())
+
+    def test_can_import_stdlib(self):
+        r = run_code("from itertools import permutations\nprint(len(list(permutations([1,2,3]))))")
+        self.assertTrue(r.success)
+        self.assertEqual(r.output, "6")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 23. BoT.run() with code execution
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestBoTCodeExecution(unittest.TestCase):
+
+    def test_disabled_by_default(self):
+        self.assertFalse(BoT(FixedMockLLM()).execute_code)
+
+    def test_executed_output_becomes_answer(self):
+        # New-task path; instantiation returns a program that prints the answer.
+        llm = SequentialMockLLM([
+            DISTILLED_INFO,
+            "Here is the solution:\n```python\nprint((3 + 7) + (10 + 4))\n```",
+        ])
+        bot = BoT(llm, update_buffer=False, init_templates=[], execute_code=True)
+        resp = bot.run("3 7 10 4")
+        self.assertEqual(resp.final_answer, "24")
+        self.assertTrue(resp.metadata["code_executed"])
+        self.assertTrue(resp.metadata["code_execution_success"])
+
+    def test_inspector_repairs_broken_code(self):
+        # First program errors; the inspector returns a corrected one.
+        llm = SequentialMockLLM([
+            DISTILLED_INFO,
+            "```python\nraise ValueError('boom')\n```",          # instantiation (bad)
+            "```python\nprint('FIXED')\n```",                    # inspector repair (good)
+        ])
+        bot = BoT(llm, update_buffer=False, init_templates=[],
+                  execute_code=True, max_code_repairs=3)
+        resp = bot.run("Q")
+        self.assertEqual(resp.final_answer, "FIXED")
+        self.assertEqual(llm.call_count, 3)  # distil + instantiate + 1 repair
+        self.assertTrue(resp.metadata["code_execution_success"])
+
+    def test_repair_budget_exhausted_falls_back_to_text(self):
+        # Every program fails; after the repair budget the textual answer stands.
+        bad = "```python\nraise RuntimeError('nope')\n```\n\n### Answer\nTEXTFALLBACK"
+        llm = SequentialMockLLM([DISTILLED_INFO] + [bad] * 6)
+        bot = BoT(llm, update_buffer=False, init_templates=[],
+                  execute_code=True, max_code_repairs=2)
+        resp = bot.run("Q")
+        self.assertEqual(resp.final_answer, "TEXTFALLBACK")
+        self.assertTrue(resp.metadata["code_executed"])
+        self.assertFalse(resp.metadata["code_execution_success"])
+        # distil + instantiate + 2 repair attempts
+        self.assertEqual(llm.call_count, 4)
+
+    def test_no_code_in_response_uses_text_answer(self):
+        llm = SequentialMockLLM([DISTILLED_INFO, NEW_TASK_RESPONSE])  # no code fence
+        bot = BoT(llm, update_buffer=False, init_templates=[], execute_code=True)
+        resp = bot.run("Q")
+        self.assertEqual(resp.final_answer, "42")
+        self.assertFalse(resp.metadata["code_executed"])
+        self.assertIsNone(resp.metadata["code_execution_success"])
+
+    def test_code_block_ignored_when_execution_disabled(self):
+        # execute_code=False: a code block in the response is NOT run; the
+        # textual ### Answer is used instead.
+        llm = SequentialMockLLM([
+            DISTILLED_INFO,
+            "```python\nprint('SHOULD-NOT-RUN')\n```\n\n### Answer\n99",
+        ])
+        bot = BoT(llm, update_buffer=False, init_templates=[], execute_code=False)
+        resp = bot.run("Q")
+        self.assertEqual(resp.final_answer, "99")
+        self.assertFalse(resp.metadata["code_executed"])
 
 
 if __name__ == "__main__":

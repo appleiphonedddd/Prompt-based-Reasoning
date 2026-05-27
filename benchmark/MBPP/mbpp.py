@@ -354,3 +354,20 @@ class MBPP(DatasetBase):
             "Write a correct, complete Python function that solves the given task. "
             "Output only the function definition — no explanations, no test code."
         )
+
+    def get_demonstrations(self, n_shot: int = 1) -> str:
+        """Hand-crafted MBPP demonstration for RoT warm-up.
+
+        The ground truth holds the hidden test list, not a reference solution,
+        so the demonstration is one canonical worked example: a natural-language
+        task plus an assertion as input and a complete function definition as
+        output, matching the task's required answer style.
+        """
+        return (
+            "Input: Write a function to find the sum of squares of the first n "
+            "natural numbers.\n"
+            "assert sum_of_squares(3) == 14\n"
+            "Output:\n"
+            "def sum_of_squares(n):\n"
+            "    return sum(i * i for i in range(1, n + 1))"
+        )
