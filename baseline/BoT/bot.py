@@ -556,26 +556,48 @@ CODE_CATEGORIES = {"Code Programming", "Application Scheduling", "Mathematical R
 
 # Appended to the instantiation prompt (code-category template hit) when
 # execute_code is enabled, so the model emits a program we can actually run.
+# The stdout is graded verbatim, so the program must SEARCH (not guess a single
+# candidate) and print the answer in the task's required FORM (e.g. the Game-of-24
+# expression itself, not its numeric value) — otherwise correct-by-luck values
+# still fail the grader and wrong guesses dominate.
 CODE_EXECUTION_DIRECTIVE = """
 
-IMPORTANT — your solution will be executed automatically. Implement it as a \
-COMPLETE, self-contained Python program that computes the answer and prints ONLY \
-the final answer to stdout. Put the entire program in a single ```python ... ``` \
-code block. Do not print explanations."""
+IMPORTANT — your solution will be executed automatically and whatever it prints to \
+stdout is taken verbatim as your final answer. Therefore:
+  1. Write a COMPLETE, self-contained, runnable Python program — never a bare \
+expression or a single guessed candidate. If the task is to find something that \
+satisfies a constraint (e.g. reaching a target value), SEARCH exhaustively over \
+the possibilities (orderings, operators, groupings, …) instead of guessing one \
+answer.
+  2. print() ONLY the final answer, on a single line, formatted EXACTLY as the \
+problem asks for it. If the problem asks for an expression, equation, formula, \
+sequence, or move, print that string itself — NOT merely its numeric value.
+  3. Print nothing else: no explanations, no extra lines.
+Put the entire program in a single ```python ... ``` code block."""
 
-# Softer variant for the new-task path, conditioned on the model's own choice of
-# the Programming-based structure.
+# Variant for the new-task path, conditioned on the model's own choice of the
+# Programming-based structure. Same contract as above.
 NEW_TASK_CODE_DIRECTIVE = """
 
-If you choose the Programming-based structure, implement the solution as a \
-COMPLETE, self-contained Python program that prints ONLY the final answer to \
-stdout, wrapped in a single ```python ... ``` code block — it will be executed."""
+If you choose the Programming-based structure, implement a COMPLETE, self-contained \
+Python program — never a bare expression or a single guessed candidate. If the task \
+is to find something satisfying a constraint, SEARCH exhaustively rather than \
+guessing. It will be executed and whatever it prints to stdout is taken verbatim as \
+your final answer, so print() ONLY the final answer on a single line, formatted \
+EXACTLY as the problem asks: if an expression, equation, or move is requested, print \
+that string itself, NOT just its numeric value. Wrap the program in a single \
+```python ... ``` code block."""
 
 INSPECTOR_SYSTEM = """\
 You are a meticulous Python debugger. The program below was written to solve a \
 problem but failed when executed. Using the code and the execution error, return a \
-corrected, COMPLETE Python program that runs without errors and prints ONLY the \
-final answer to stdout.
+corrected, COMPLETE Python program that runs without errors.
+
+The program's stdout is taken verbatim as the final answer, so it must print() ONLY \
+the final answer on a single line, formatted EXACTLY as the problem asks. If an \
+expression, equation, formula, or move is requested, print that string itself — NOT \
+merely its numeric value. Preserve the program's intent (e.g. an exhaustive search); \
+never collapse it into printing a single hard-coded value.
 
 Return ONLY the corrected program inside a single ```python ... ``` code block."""
 
