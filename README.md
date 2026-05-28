@@ -139,6 +139,11 @@ python main.py --model qwen2.5:32b --baseline tot --benchmark gameof24 --tot_n_g
 python main.py --model qwen2.5:32b --baseline got --benchmark gameof24 --got_branches 3 --got_keep 1 --got_refine 0
 ```
 
+**Buffer-of-Thought**
+```bash
+python main.py --baseline bot --benchmark gameof24 --model qwen2.5:32b --bot_execute_code --bot_max_repairs 3 --bot_code_timeout 10
+```
+
 **BigBenchHard — 27 task categories**
 ```bash
 python main.py --model qwen2.5:32b --baseline zerocot --benchmark bigbenchhard --bigbenchhard_task geometric_shapes
