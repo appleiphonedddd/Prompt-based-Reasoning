@@ -53,6 +53,9 @@ BASELINE_REGISTRY: dict[str, tuple] = {
         instantiation_temperature=a.instantiation_temperature,
         embedding_model=SentenceTransformerEmbedding(a.rot_embedding_model),
         similarity_threshold=a.rot_similarity_threshold,
+        execute_code=a.rot_execute_code,
+        max_code_repairs=a.rot_max_repairs,
+        code_timeout=a.rot_code_timeout,
     )),
     "tot": (ToT, lambda a: dict(
         n_generate_sample=a.tot_n_generate,
@@ -398,6 +401,16 @@ def rot_args(parser: argparse.ArgumentParser) -> None:
                    help="SentenceTransformer model name for CPM similarity")
     g.add_argument("--rot_similarity_threshold", type=float, default=0.7,
                    help="CPM similarity threshold δ (paper recommends 0.6–0.8)")
+    g.add_argument("--no_rot_execute_code", action="store_false", dest="rot_execute_code",
+                   help="Disable executing the instantiated Python program. By default RoT "
+                        "RUNS the generated program (paper Fig. 7) and uses its stdout as the "
+                        "answer — essential for search/verification tasks (Game of 24, Python "
+                        "Puzzles, CRUXEval). WARNING: runs untrusted model-generated code in a "
+                        "timeout-bounded subprocess; disable on an untrusted host.")
+    g.add_argument("--rot_max_repairs", type=int, default=3,
+                   help="Max inspector repair attempts when executed code errors (default: 3)")
+    g.add_argument("--rot_code_timeout", type=float, default=10.0,
+                   help="Per-execution timeout in seconds for generated code (default: 10)")
 
 
 def tot_args(parser: argparse.ArgumentParser) -> None:
@@ -439,11 +452,12 @@ def bot_args(parser: argparse.ArgumentParser) -> None:
                    help="Temperature for final reasoning instantiation")
     g.add_argument("--no_update_buffer", action="store_false", dest="update_buffer",
                    help="Disable automatic buffer updating after solving")
-    g.add_argument("--bot_execute_code", action="store_true", dest="bot_execute_code",
-                   help="Execute the instantiated Python program and use its stdout as the "
-                        "answer (paper §4.1; drives the Game-of-24 / programming / chess "
-                        "results). WARNING: runs untrusted model-generated code in a "
-                        "timeout-bounded subprocess — enable only on a trusted host. Default: off.")
+    g.add_argument("--no_bot_execute_code", action="store_false", dest="bot_execute_code",
+                   help="Disable executing the instantiated Python program. By default BoT "
+                        "RUNS the generated program (paper §4.1) and uses its stdout as the "
+                        "answer — drives the Game-of-24 / programming / chess results. "
+                        "WARNING: runs untrusted model-generated code in a timeout-bounded "
+                        "subprocess; disable on an untrusted host.")
     g.add_argument("--bot_max_repairs", type=int, default=3,
                    help="Max inspector repair attempts when executed code errors (default: 3)")
     g.add_argument("--bot_code_timeout", type=float, default=10.0,

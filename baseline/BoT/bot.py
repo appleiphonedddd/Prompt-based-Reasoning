@@ -512,23 +512,36 @@ You are a Meta Reasoner with deep expertise across Computer Science, Mathematics
 Physics, Literature, History, Chemistry, Logic, and Language.
 
 You will be given:
-  (a) a distilled problem description, and
-  (b) a thought-template that provides a high-level reasoning structure.
+  (a) the original problem (the ground-truth instance you must actually solve),
+  (b) a distilled problem description that highlights the key information, and
+  (c) a thought-template that provides a high-level reasoning structure.
+
+Solve the ORIGINAL problem. Use the distilled description and the thought-template \
+only as guidance — never substitute, generalise, or alter the concrete numbers, \
+options, or wording of the original problem. Your final answer MUST follow the exact \
+output format the original problem requires (e.g. the option label such as "(B)" for \
+multiple-choice questions, the exact number, the requested expression, etc.).
 
 Format your final answer as:
 ### Reasoning
 <step-by-step reasoning following the template>
 
 ### Answer
-<concise final answer>
+<concise final answer, in the exact format the original problem requires>
 """
 
 NEW_TASK_SYSTEM = """\
 You are a Meta Reasoner with deep expertise across Computer Science, Mathematics, \
 Physics, Literature, History, Chemistry, Logic, and Language.
 
-You will be given a distilled problem description for a task that has no prior \
-reasoning template. First choose ONE of the following three general reasoning \
+You will be given the original problem (the ground-truth instance you must actually \
+solve) together with a distilled problem description for a task that has no prior \
+reasoning template. Solve the ORIGINAL problem — never substitute, generalise, or \
+alter its concrete numbers, options, or wording — and answer in the exact output \
+format the original problem requires (e.g. the option label such as "(B)" for \
+multiple-choice questions, the exact number, the requested expression, etc.).
+
+First choose ONE of the following three general reasoning \
 structures that best fits the problem:
 
   i)   Prompt-based structure   — best for Common Sense Reasoning and Application
@@ -721,7 +734,11 @@ class BoT(BaseBaseline):
     # ── Stage 3 ───────────────────────────────────────────────────────────────
 
     def instantiate_with_template(
-        self, distilled_info: str, template: ThoughtTemplate, system_prompt: Optional[str] = None
+        self,
+        distilled_info: str,
+        template: ThoughtTemplate,
+        original_question: str,
+        system_prompt: Optional[str] = None,
     ) -> str:
         role_line = f"[Role]\n{system_prompt}\n\n" if system_prompt else ""
         solution_desc_line = (
@@ -736,6 +753,7 @@ class BoT(BaseBaseline):
         prompt = (
             f"{INSTANTIATION_SYSTEM}{code_directive}\n\n"
             f"{role_line}"
+            f"[Original Problem]\n{original_question}\n\n"
             f"[Distilled Problem]\n{distilled_info}\n\n"
             f"[Thought Template — {template.category}]\n"
             f"Task Description:\n{template.description}\n"
@@ -744,10 +762,17 @@ class BoT(BaseBaseline):
         )
         return self.call_llm(prompt, temperature=self.instantiation_temperature).content.strip()
 
-    def instantiate_new_task(self, distilled_info: str, system_prompt: Optional[str] = None) -> str:
+    def instantiate_new_task(
+        self, distilled_info: str, original_question: str, system_prompt: Optional[str] = None
+    ) -> str:
         role_line = f"[Role]\n{system_prompt}\n\n" if system_prompt else ""
         code_directive = NEW_TASK_CODE_DIRECTIVE if self.execute_code else ""
-        prompt = f"{NEW_TASK_SYSTEM}{code_directive}\n\n{role_line}[Distilled Problem]\n{distilled_info}"
+        prompt = (
+            f"{NEW_TASK_SYSTEM}{code_directive}\n\n"
+            f"{role_line}"
+            f"[Original Problem]\n{original_question}\n\n"
+            f"[Distilled Problem]\n{distilled_info}"
+        )
         return self.call_llm(prompt, temperature=self.instantiation_temperature).content.strip()
 
     # ── Answer extraction ─────────────────────────────────────────────────────
@@ -824,9 +849,13 @@ class BoT(BaseBaseline):
             )
 
         raw_solution = (
-            self.instantiate_with_template(distilled_info, template, system_prompt=system_prompt)
+            self.instantiate_with_template(
+                distilled_info, template, full_question, system_prompt=system_prompt
+            )
             if template is not None
-            else self.instantiate_new_task(distilled_info, system_prompt=system_prompt)
+            else self.instantiate_new_task(
+                distilled_info, full_question, system_prompt=system_prompt
+            )
         )
         intermediate_steps.append(f"[Stage 3: Instantiated Reasoning]\n{raw_solution}")
         final_answer = self.extract_answer(raw_solution)

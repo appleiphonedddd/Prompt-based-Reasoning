@@ -31,9 +31,41 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict, Tuple
 
 from baseline.basebaseline import BaseBaseline, BaselineResponse
+# Reuse BoT's sandboxed code-execution helpers (single tested implementation,
+# no duplication). RoT's "Programming-based" reasoning structure produces logical
+# pseudocode/Python that the paper actually executes (Fig. 7); running it here is
+# what lets RoT solve search/verification tasks (Game of 24, Python Puzzles, …)
+# instead of emitting plausible-but-unverified guesses.
+from baseline.BoT.bot import (
+    extract_code,
+    run_code,
+    CodeExecutionResult,
+    INSPECTOR_SYSTEM,
+)
 from models.base import BaseLLM
 
 logger = logging.getLogger(__name__)
+
+# Appended to the instantiation prompt when execute_code is enabled. The stdout
+# of the generated program is graded verbatim, so the program must SEARCH (not
+# guess a single candidate) and print the answer in the task's EXACT required
+# form (e.g. the Game-of-24 expression itself, the CRUXEval Python literal, the
+# multiple-choice option label) — otherwise correct reasoning still fails grading.
+CODE_EXECUTION_DIRECTIVE = """
+
+IMPORTANT — EXECUTION MODE IS ON. If (and only if) the task is best solved \
+programmatically (e.g. arithmetic search, code reasoning, combinatorial puzzles), \
+output a SINGLE complete, self-contained, runnable Python program inside one \
+```python ... ``` code block, and nothing else. It will be executed automatically \
+and whatever it prints to stdout is taken verbatim as your final answer. Therefore:
+  1. SEARCH exhaustively over the possibilities instead of guessing one answer \
+when the task asks for something satisfying a constraint (e.g. reaching a target).
+  2. print() ONLY the final answer, on a single line, formatted EXACTLY as the \
+problem requires. If an expression, equation, move, option label (e.g. "(B)"), or \
+literal is requested, print that string itself — NOT merely an intermediate value.
+  3. Print nothing else: no explanations, no extra lines.
+For purely linguistic/creative or non-computational tasks, do NOT write code — \
+instead answer in the "** Thinking ** / ** Answer **" format below."""
 
 # ─────────────────────────────────────────────────────────
 # Prompt templates (adapted from the official RoT release)
@@ -234,6 +266,9 @@ class RoT(BaseBaseline):
         embedding_model: Optional[BaseEmbeddingModel] = None,
         similarity_threshold: float = 0.7,
         task_prompt: Optional[str] = None,
+        execute_code: bool = True,
+        max_code_repairs: int = 3,
+        code_timeout: float = 10.0,
     ):
         """Initialize RoT baseline.
 
@@ -266,6 +301,11 @@ class RoT(BaseBaseline):
         self.embedding_model = embedding_model
         self.similarity_threshold = similarity_threshold
         self.task_prompt = task_prompt
+        # Code execution (paper Fig. 7) — runs untrusted, model-generated Python in
+        # a timeout-bounded subprocess; enable only on a trusted/sandboxed host.
+        self.execute_code = execute_code
+        self.max_code_repairs = max_code_repairs
+        self.code_timeout = code_timeout
         # Cached results of Stage 1 & 2 — these don't depend on the question,
         # only on the demos/task, so we run them once and reuse across all questions.
         self._cached_llm_taste: Optional[str] = None
@@ -576,7 +616,43 @@ class RoT(BaseBaseline):
         Returns:
             Formatted instantiation prompt string.
         """
-        return INSTANTIATION_PROMPT.format(llm_taste=llm_taste)
+        base = INSTANTIATION_PROMPT.format(llm_taste=llm_taste)
+        if self.execute_code:
+            base += CODE_EXECUTION_DIRECTIVE
+        return base
+
+    def execute_solution(
+        self, raw_solution: str, system_prompt: Optional[str] = None
+    ) -> Optional[CodeExecutionResult]:
+        """Extract and run the program in ``raw_solution``, repairing on failure.
+
+        Returns ``None`` when the solution contains no fenced code (the caller
+        then falls back to textual ``** Answer **`` extraction). On a failed run
+        the inspector prompt feeds the code + error back to the LLM, up to
+        ``max_code_repairs`` times. All LLM calls go through ``call_llm`` so token
+        accounting stays correct.
+        """
+        code = extract_code(raw_solution)
+        if code is None:
+            return None
+
+        result = run_code(code, timeout=self.code_timeout)
+        attempts = 0
+        while not result.success and attempts < self.max_code_repairs:
+            attempts += 1
+            role_line = f"[Role]\n{system_prompt}\n\n" if system_prompt else ""
+            prompt = (
+                f"{INSPECTOR_SYSTEM}\n\n"
+                f"{role_line}"
+                f"[Code]\n```python\n{result.code}\n```\n\n"
+                f"[Execution Error]\n{result.error}"
+            )
+            fixed = self.call_llm(
+                prompt, temperature=self.instantiation_temperature
+            ).content
+            new_code = extract_code(fixed) or fixed.strip()
+            result = run_code(new_code, timeout=self.code_timeout)
+        return result
 
     def parse_instantiation_response(self, response_text: str) -> Tuple[str, str]:
         """Parse the instantiation response to extract thinking and answer.
@@ -734,6 +810,27 @@ class RoT(BaseBaseline):
             f"[Stage 4: Instantiation]\n{response.content.strip()}"
         )
 
+        # ── Stage 4b: optional code execution (paper Fig. 7) ──
+        # When the instantiation emits a program, run it and take its stdout as
+        # the answer (with an inspector repair loop). This is what lets the
+        # Programming-based reasoning structure actually solve search/verification
+        # tasks rather than emitting an unverified guess.
+        code_attempted = False
+        code_success: Optional[bool] = None
+        if self.execute_code:
+            exec_result = self.execute_solution(
+                response.content, system_prompt=system_prompt
+            )
+            if exec_result is not None:
+                code_attempted = True
+                code_success = exec_result.success
+                if exec_result.success:
+                    final_answer = exec_result.output
+                intermediate_steps.append(
+                    f"[Stage 4b: Code Execution] success={exec_result.success}\n"
+                    f"output={exec_result.output!r}\nerror={exec_result.error!r}"
+                )
+
         # Build reasoning trace
         reasoning_trace = (
             f"[RoT Warm-up] Selected candidate {optimal_idx + 1}/{self.warmup}\n"
@@ -763,5 +860,8 @@ class RoT(BaseBaseline):
                 "cpm_boundary": cpm_boundary,
                 "cpm_similarity": cpm_similarity,
                 "similarity_threshold": self.similarity_threshold,
+                "execute_code": self.execute_code,
+                "code_executed": code_attempted,
+                "code_execution_success": code_success,
             },
         )
