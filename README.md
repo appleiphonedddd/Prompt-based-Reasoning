@@ -211,3 +211,15 @@ class MyBenchmark(DatasetBase):
 DATASET_REGISTRY["mybench"] = (MyBenchmark, lambda _: {})
 ```
 
+---
+
+## 🛑 U.S. Export Control & Sanctions Compliance
+
+By downloading, installing, copying, accessing, or using this repository (including but not limited to the source code, frameworks, documentation, and prompt benchmarking assets), you agree to comply with all applicable export control and economic sanctions laws.
+
+### Restricted Usage & Prohibitions
+* **Prohibited Entities:** This software is strictly prohibited from being used, directly or indirectly, by any entity or individual listed on any United States Government restricted lists, including but not limited to the **OFAC Specially Designated Nationals (SDN) List** and the **Bureau of Industry and Security (BIS) Entity List**.
+* **Prohibited Destinations:** This repository shall not be exported, re-exported, transferred, or accessed within any U.S.-embargoed or sanctioned countries or territories (including Russia, Belarus, Iran, North Korea, Cuba, Syria, and the Crimea, Donetsk, and Luhansk regions of Ukraine).
+* **Military & Defense Restrictions:** This software shall not be utilized for military purposes, defense applications, or any activity that contributes to the modernization of foreign military forces or intelligence systems subject to global trade restrictions.
+
+*Failure to comply with these terms constitutes a material violation of the repository's terms of use, and any license granted herein shall be automatically terminated and revoked void ab initio.*
