@@ -15,6 +15,7 @@ from baseline.RoT import RoT, SentenceTransformerEmbedding
 from baseline.ToT import ToT
 from baseline.BoT import BoT
 from baseline.GoT import GoT
+from baseline.DoC import DoC
 from baseline.Standard import Input
 from utils.metrics import Efficiency, Accuracy
 from utils.get_mean_std import AccuracyStatistics
@@ -84,6 +85,16 @@ BASELINE_REGISTRY: dict[str, tuple] = {
         gen_temperature=a.got_gen_temp,
         score_temperature=a.got_score_temp,
         agg_temperature=a.got_agg_temp,
+    )),
+    "doc": (DoC, lambda a: dict(
+        max_iterations=a.doc_max_iterations,
+        patience=a.doc_patience,
+        confidence_threshold=a.doc_confidence_threshold,
+        branch_k=a.doc_branch_k,
+        gen_temperature=a.doc_gen_temp,
+        execute_code=a.doc_execute_code,
+        max_code_repairs=a.doc_max_repairs,
+        code_timeout=a.doc_code_timeout,
     )),
 }
 
@@ -373,7 +384,7 @@ def general_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--benchmark",    default="gameof24",
                         help="Benchmark / dataset name (gameof24, mgsm, sonnetwriting, bigbenchhard, programmingpuzzles, humaneval, mbpp, apps, classeval, cruxeval)")
     parser.add_argument("--baseline",     default="zerocot",
-                        help="Baseline: standard | zerocot | zerocot_single | rot | tot | bot | got")
+                        help="Baseline: standard | zerocot | zerocot_single | rot | tot | bot | got | doc")
     parser.add_argument("--num_runs",     type=int, default=1,
                         help="Independent experiment runs")
     parser.add_argument("--language",     default="all",
@@ -481,6 +492,32 @@ def got_args(parser: argparse.ArgumentParser) -> None:
                    help="Sampling temperature for final answer aggregation (0 = deterministic)")
 
 
+def doc_args(parser: argparse.ArgumentParser) -> None:
+    g = parser.add_argument_group("DoC")
+    g.add_argument("--doc_max_iterations", type=int, default=10,
+                   help="Effort budget B: max operators synthesized per instance")
+    g.add_argument("--doc_patience", type=int, default=3,
+                   help="Patience m: stop after this many non-improving steps")
+    g.add_argument("--doc_confidence_threshold", type=float, default=0.30,
+                   help="Confidence gate θ (avg token probability). Generations below "
+                        "this are distrusted and re-anchored toward Φ/G, away from Branch.")
+    g.add_argument("--doc_branch_k", type=int, default=3,
+                   help="Number of candidate continuations the Branch operator proposes")
+    g.add_argument("--doc_gen_temp", type=float, default=0.7,
+                   help="Sampling temperature for generative operators (Abstract, Branch)")
+    g.add_argument("--no_doc_execute_code", action="store_false", dest="doc_execute_code",
+                   help="Disable the Ground operator (external execution). By default DOC "
+                        "renders checkable states to a Python program, RUNS it, and uses "
+                        "the executor's verdict — the mechanism that lifts the ceiling on "
+                        "Game of 24 / Python Puzzles / CRUXEval. WARNING: runs untrusted "
+                        "model-generated code in a timeout-bounded subprocess; disable on "
+                        "an untrusted host.")
+    g.add_argument("--doc_max_repairs", type=int, default=3,
+                   help="Max Repair attempts on a located Faulty obligation (default: 3)")
+    g.add_argument("--doc_code_timeout", type=float, default=10.0,
+                   help="Per-execution timeout in seconds for grounded code (default: 10)")
+
+
 def pp_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("ProgrammingPuzzles")
     g.add_argument("--pp_num_samples", type=int, default=None,
@@ -500,6 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
     tot_args(parser)
     bot_args(parser)
     got_args(parser)
+    doc_args(parser)
     pp_args(parser)
     return parser
 
