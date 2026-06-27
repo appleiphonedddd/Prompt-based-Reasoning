@@ -197,15 +197,26 @@ class DoC(BaseBaseline):
         return n
 
     def op_ground(self, s: State) -> State:
-        """G — render the state to an executable program (Verify runs it)."""
+        """G — render the state to a SELF-VERIFYING executable program (Verify runs it).
+
+        The program must check its own answer against an invariant derived ONLY from
+        the problem statement and emit the answer behind a ``__DOC_OK__`` sentinel iff
+        that check passes. Tasks with no checkable invariant (word problems, output
+        prediction) thus never produce the sentinel, so grounding cannot overwrite a
+        model-checked answer with an unproven one.
+        """
         guide = f"Plan / partial reasoning:\n{s.plan or s.draft}\n\n" if (s.plan or s.draft) else ""
         r = self._gen(
             f"Problem:\n{s.goal}\n\n{guide}"
-            "Write a COMPLETE, self-contained Python program that SOLVES the problem by "
-            "searching/computing (never guessing a single candidate) and prints ONLY the "
-            "final answer to stdout, on one line, formatted EXACTLY as the problem "
-            "requires (print the expression/equation/move itself, not merely its value). "
-            "Wrap it in a single ```python ... ``` block.",
+            "Write a COMPLETE, self-contained Python program that solves the problem by "
+            "searching/computing (never guessing a single candidate). The program MUST "
+            "verify its own answer with a check derived ONLY from the problem statement "
+            "(e.g. the expression equals the target and uses each number exactly once; "
+            "the candidate satisfies sat(...)). If and ONLY IF that self-check passes, "
+            "print on one line exactly:\n"
+            "    __DOC_OK__<final answer in the exact required format>\n"
+            "If the task has no such checkable constraint, or the check fails, print the "
+            "answer WITHOUT the __DOC_OK__ prefix. Wrap the code in one ```python ... ``` block.",
             temperature=0.0)
         n = s.clone(); n.draft = r.content.strip(); n.gen_logprob = r.avg_logprob
         return n
@@ -242,11 +253,19 @@ class DoC(BaseBaseline):
         # correctness, so it does not co-degrade with model quality.
         if self.execute_code and extract_code(s.draft):
             res = run_code(extract_code(s.draft), timeout=self.code_timeout)
-            if res.success:
-                s.answer = res.output
+            if not res.success:
+                s.cex = res.error
+                return False, FAULTY
+            marker = "__DOC_OK__"
+            if marker in res.output:
+                # The program proved its own answer against a problem-derived
+                # invariant — a deterministic executor, not the model, certifies it.
+                s.answer = res.output.split(marker, 1)[1].strip()
                 return True, SOLVED
-            s.cex = res.error
-            return False, FAULTY
+            # Ran cleanly but could not self-verify: an unproven claim, not ground
+            # truth. Don't let it overwrite a model-checked answer — stay Unverified
+            # so `best` keeps the earlier (natural-language) state.
+            return True, UNVERIFIED
         # (2) Confidence gate — distrust low-confidence generations and re-anchor
         # toward Φ/G, away from Branch whose value hinges on strong generation.
         if (s.last_op in ("Φ", "B") and s.gen_logprob is not None
