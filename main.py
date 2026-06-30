@@ -15,7 +15,7 @@ from baseline.RoT import RoT, SentenceTransformerEmbedding
 from baseline.ToT import ToT
 from baseline.BoT import BoT
 from baseline.GoT import GoT
-from baseline.DoC import DoC
+from baseline.FoT import FoT
 from baseline.Standard import Input
 from utils.metrics import Efficiency, Accuracy
 from utils.get_mean_std import AccuracyStatistics
@@ -86,15 +86,15 @@ BASELINE_REGISTRY: dict[str, tuple] = {
         score_temperature=a.got_score_temp,
         agg_temperature=a.got_agg_temp,
     )),
-    "doc": (DoC, lambda a: dict(
-        max_iterations=a.doc_max_iterations,
-        patience=a.doc_patience,
-        confidence_threshold=a.doc_confidence_threshold,
-        branch_k=a.doc_branch_k,
-        gen_temperature=a.doc_gen_temp,
-        execute_code=a.doc_execute_code,
-        max_code_repairs=a.doc_max_repairs,
-        code_timeout=a.doc_code_timeout,
+    "fot": (FoT, lambda a: dict(
+        budget=a.fot_budget,
+        survival_threshold=a.fot_survival,
+        solve_temperature=a.fot_solve_temp,
+        falsify_temperature=a.fot_falsify_temp,
+        repair_temperature=a.fot_repair_temp,
+        execute_code=a.fot_execute_code,
+        code_timeout=a.fot_code_timeout,
+        carry_witness_history=a.fot_witness_history,
     )),
 }
 
@@ -379,12 +379,12 @@ class Evaluator:
 # To add a news baseline: add one _add_<name>_args function and call it below.
 
 def general_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--model",        default="qwen2.5:14b",
+    parser.add_argument("--model",        default="qwen2.5:32b",
                         help="Model name (prefix = provider, e.g. 'gemini:...')")
     parser.add_argument("--benchmark",    default="gameof24",
                         help="Benchmark / dataset name (gameof24, mgsm, sonnetwriting, bigbenchhard, programmingpuzzles, humaneval, mbpp, apps, classeval, cruxeval)")
     parser.add_argument("--baseline",     default="zerocot",
-                        help="Baseline: standard | zerocot | zerocot_single | rot | tot | bot | got | doc")
+                        help="Baseline: standard | zerocot | zerocot_single | rot | tot | bot | got | fot")
     parser.add_argument("--num_runs",     type=int, default=1,
                         help="Independent experiment runs")
     parser.add_argument("--language",     default="all",
@@ -492,30 +492,35 @@ def got_args(parser: argparse.ArgumentParser) -> None:
                    help="Sampling temperature for final answer aggregation (0 = deterministic)")
 
 
-def doc_args(parser: argparse.ArgumentParser) -> None:
-    g = parser.add_argument_group("DoC")
-    g.add_argument("--doc_max_iterations", type=int, default=10,
-                   help="Effort budget B: max operators synthesized per instance")
-    g.add_argument("--doc_patience", type=int, default=3,
-                   help="Patience m: stop after this many non-improving steps")
-    g.add_argument("--doc_confidence_threshold", type=float, default=0.30,
-                   help="Confidence gate θ (avg token probability). Generations below "
-                        "this are distrusted and re-anchored toward Φ/G, away from Branch.")
-    g.add_argument("--doc_branch_k", type=int, default=3,
-                   help="Number of candidate continuations the Branch operator proposes")
-    g.add_argument("--doc_gen_temp", type=float, default=0.7,
-                   help="Sampling temperature for generative operators (Abstract, Branch)")
-    g.add_argument("--no_doc_execute_code", action="store_false", dest="doc_execute_code",
-                   help="Disable the Ground operator (external execution). By default DOC "
-                        "renders checkable states to a Python program, RUNS it, and uses "
-                        "the executor's verdict — the mechanism that lifts the ceiling on "
-                        "Game of 24 / Python Puzzles / CRUXEval. WARNING: runs untrusted "
-                        "model-generated code in a timeout-bounded subprocess; disable on "
-                        "an untrusted host.")
-    g.add_argument("--doc_max_repairs", type=int, default=3,
-                   help="Max Repair attempts on a located Faulty obligation (default: 3)")
-    g.add_argument("--doc_code_timeout", type=float, default=10.0,
-                   help="Per-execution timeout in seconds for grounded code (default: 10)")
+def fot_args(parser: argparse.ArgumentParser) -> None:
+    g = parser.add_argument_group("FoT")
+    g.add_argument("--fot_budget", type=int, default=4,
+                   help="Budget K: maximum number of Falsify→Repair iterations "
+                        "before the last candidate is returned (paper Algorithm 1)")
+    g.add_argument("--fot_survival", type=int, default=2,
+                   help="Survival threshold m: independent falsification attempts a "
+                        "candidate must survive before it is accepted as a fixpoint "
+                        "(mitigates false refutations in the semantic regime)")
+    g.add_argument("--fot_solve_temp", type=float, default=0.0,
+                   help="Sampling temperature for the initial Solve (CoT candidate)")
+    g.add_argument("--fot_falsify_temp", type=float, default=0.7,
+                   help="Sampling temperature for falsification — non-zero so the m "
+                        "attempts are genuinely independent (different witnesses)")
+    g.add_argument("--fot_repair_temp", type=float, default=0.0,
+                   help="Sampling temperature for witness-guided Repair")
+    g.add_argument("--no_fot_execute_code", action="store_false", dest="fot_execute_code",
+                   help="Disable the executable falsification regime. By default FoT "
+                        "writes a checker program and lets a deterministic executor "
+                        "decide (SOUND witnesses for Game of 24, Geometric Shapes, code "
+                        "tasks), falling back to semantic falsification otherwise. "
+                        "WARNING: runs untrusted model-generated code in a "
+                        "timeout-bounded subprocess; disable on an untrusted host.")
+    g.add_argument("--fot_code_timeout", type=float, default=10.0,
+                   help="Per-execution timeout in seconds for the checker program")
+    g.add_argument("--no_fot_witness_history", action="store_false", dest="fot_witness_history",
+                   help="Disable carrying past witnesses into Repair. By default a short "
+                        "history is forwarded so repairs do not reintroduce previously "
+                        "resolved failures (discouraging oscillation).")
 
 
 def pp_args(parser: argparse.ArgumentParser) -> None:
@@ -537,7 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     tot_args(parser)
     bot_args(parser)
     got_args(parser)
-    doc_args(parser)
+    fot_args(parser)
     pp_args(parser)
     return parser
 
