@@ -213,4 +213,5 @@ __marimo__/
 # ignore folder
 
 benchmark/APPS/data
+results/
 

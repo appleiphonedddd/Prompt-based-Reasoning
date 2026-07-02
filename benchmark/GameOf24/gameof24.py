@@ -34,6 +34,7 @@ _SAFE_NODES = (
     ast.Constant,
     ast.Add, ast.Sub, ast.Mult, ast.Div,
     ast.USub,
+    ast.UAdd,
 )
 
 _OPS = {
@@ -42,6 +43,7 @@ _OPS = {
     ast.Mult: operator.mul,
     ast.Div:  operator.truediv,
     ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
 }
 
 

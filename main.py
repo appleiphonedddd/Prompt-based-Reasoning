@@ -136,6 +136,11 @@ class Evaluator:
             kwargs["task_prompt"] = "\n".join(parts)
             # Input-output demonstrations D for the reverse-reasoning warm-up.
             kwargs["demos"] = dataset.get_demonstrations(n_shot=self.args.rot_n_shot)
+        if self.args.baseline.lower() == "fot":
+            # HasChecker(q) is fixed per benchmark: pass the benchmark name so FoT
+            # selects its trusted checker c_q (executable regime) or falls to the
+            # semantic regime when none is registered.
+            kwargs["task"] = self.args.benchmark.lower()
         return cls(llm=client, **kwargs)
 
     def build_dataset(self):
@@ -494,7 +499,7 @@ def got_args(parser: argparse.ArgumentParser) -> None:
 
 def fot_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("FoT")
-    g.add_argument("--fot_budget", type=int, default=4,
+    g.add_argument("--fot_budget", type=int, default=3,
                    help="Budget K: maximum number of Falsify→Repair iterations "
                         "before the last candidate is returned (paper Algorithm 1)")
     g.add_argument("--fot_survival", type=int, default=2,
@@ -509,14 +514,15 @@ def fot_args(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--fot_repair_temp", type=float, default=0.0,
                    help="Sampling temperature for witness-guided Repair")
     g.add_argument("--no_fot_execute_code", action="store_false", dest="fot_execute_code",
-                   help="Disable the executable falsification regime. By default FoT "
-                        "writes a checker program and lets a deterministic executor "
-                        "decide (SOUND witnesses for Game of 24, Geometric Shapes, code "
-                        "tasks), falling back to semantic falsification otherwise. "
-                        "WARNING: runs untrusted model-generated code in a "
-                        "timeout-bounded subprocess; disable on an untrusted host.")
+                   help="Disable the executable falsification regime, forcing semantic "
+                        "falsification on every benchmark. By default FoT uses a "
+                        "trusted, benchmark-specific checker c_q (arithmetic for Game "
+                        "of 24, program execution for CRUXEval, sat() for Python "
+                        "Puzzles) that yields SOUND witnesses; the model only proposes "
+                        "the probe. The checker runs the benchmark's own reference code "
+                        "in a timeout-bounded subprocess.")
     g.add_argument("--fot_code_timeout", type=float, default=10.0,
-                   help="Per-execution timeout in seconds for the checker program")
+                   help="Per-execution timeout in seconds for the trusted checker c_q")
     g.add_argument("--no_fot_witness_history", action="store_false", dest="fot_witness_history",
                    help="Disable carrying past witnesses into Repair. By default a short "
                         "history is forwarded so repairs do not reintroduce previously "
