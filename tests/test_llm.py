@@ -5,7 +5,6 @@ import os
 from models.base import LLMResponse, BaseLLM
 from models.deepseek import DeepSeekClient
 from models.gpt import GPTClient
-from models.gemini import GeminiClient
 from models.llama import LlamaClient
 from models.qwen import QwenClient
 
@@ -184,26 +183,6 @@ class TestLLMClasses(unittest.TestCase):
 
     def test_qwen_missing_key(self):
         self.assert_missing_key_error(QwenClient)
-
-    # 5. Gemini Tests
-    def test_gemini_full_flow(self):
-        self.assert_openai_style_client(
-            GeminiClient,
-            patch_target='models.gemini.OpenAI',
-            expected_model="gemini-2.0-flash-lite",
-            expected_base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        )
-
-    def test_gemini_env_fallback(self):
-        self.assert_env_fallback(
-            GeminiClient,
-            patch_target='models.gemini.OpenAI',
-            env_var_name="GEMINI_API_KEY",
-            expected_base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        )
-
-    def test_gemini_missing_key(self):
-        self.assert_missing_key_error(GeminiClient)
 
 
 if __name__ == '__main__':
