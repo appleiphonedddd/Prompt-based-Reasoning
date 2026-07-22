@@ -59,6 +59,16 @@ def _safe_eval(expr: str) -> float:
     except SyntaxError as exc:
         raise ValueError(f"Invalid expression syntax: {expr!r}") from exc
 
+    def _lookup(op_node):
+        # The _SAFE_NODES check below only sees the BinOp/UnaryOp wrapper, not
+        # the operator it carries, so an unsupported operator (%, **, //, ...)
+        # reaches here.  Report it as a ValueError like any other malformed
+        # expression instead of letting a KeyError escape evaluate_answer().
+        op = _OPS.get(type(op_node))
+        if op is None:
+            raise ValueError(f"Disallowed operator: {type(op_node).__name__}")
+        return op
+
     def _visit(node):
         if not isinstance(node, _SAFE_NODES):
             raise ValueError(f"Disallowed AST node: {type(node).__name__}")
@@ -69,12 +79,12 @@ def _safe_eval(expr: str) -> float:
         if isinstance(node, ast.BinOp):
             left  = _visit(node.left)
             right = _visit(node.right)
-            op    = _OPS[type(node.op)]
+            op    = _lookup(node.op)
             if isinstance(node.op, ast.Div) and right == 0:
                 raise ZeroDivisionError("Division by zero in expression.")
             return op(left, right)
         if isinstance(node, ast.UnaryOp):
-            return _OPS[type(node.op)](_visit(node.operand))
+            return _lookup(node.op)(_visit(node.operand))
         raise ValueError(f"Unexpected node: {node}")
 
     return _visit(tree)
