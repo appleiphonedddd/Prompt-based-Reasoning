@@ -3,20 +3,22 @@ Unit tests for the Falsification-of-Thought (FoT) baseline.
 
 Test organisation
 ─────────────────
- 1.  TestAnswerHelpers          — rho's comparison primitives
+ 1.  TestAnswerHelpers          — phi's comparison primitives
  2.  TestOptionRelations        — multiple-choice relabelling (T and g^-1)
- 3.  TestSvgRelations           — affine / reversal relations on SVG paths
- 4.  TestWordProblemRelations   — scaling, masking, premise permutation
+ 3.  TestSvgRelations           — affine / reversal relations, and rho_inv
+ 4.  TestWordProblemRelations   — scaling, backward substitution, permutation
  5.  TestCodeRelations          — identifier renaming, dead-code insertion
- 6.  TestCatalogue              — HasChecker / catalogue selection, --fot_relations
+ 6.  TestLibrary                — HasChecker / library selection, --fot_relations
  7.  TestGeneratedCatalogue     — pi_mr-gen parsing (ablation)
- 8.  TestCheckers               — trusted checkers c_q
- 9.  TestExecutableRegime       — model proposes, checker decides
-10.  TestMetamorphicRegime      — orbit, tau, majority rule, independence
-11.  TestDriver                 — fixpoint, budget exhaustion, archive floor
+ 8.  TestParsersAndVoting       — Extract(.) and Majority(.)
+ 9.  TestCheckers               — trusted checkers c_q
+10.  TestExecutableRegime       — model proposes, checker decides
+11.  TestRelationalRegime       — voted derivation, abstention, distinctness
+12.  TestDriver                 — fixpoint, budget exhaustion, archive ablation
 
 Reference:
-    "Falsification-of-Thought: Reasoning by Metamorphic Self-Refutation".
+    "Falsification-of-Thought: Reasoning by Self-Refutation with Relational
+    Falsification".
 """
 
 import re
@@ -30,10 +32,13 @@ from baseline.FoT.checkers import (
     has_checker,
     multistep_arithmetic_checker,
 )
+from baseline.FoT.fot import UNDETERMINED, _majority, _parse_derived
 from baseline.FoT.relations import (
     answers_equal,
+    enumerate_slots,
     get_catalogue,
     normalize_answer,
+    numeric_literals,
     option_letter,
     parse_generated_catalogue,
     parse_number,
@@ -72,6 +77,13 @@ def _relation(task: str, name: str, subtask: Optional[str] = None):
     return next(r for r in get_catalogue(task, subtask) if r.name == name)
 
 
+def _answer_shape(prompt: str, shape: str) -> str:
+    """Answer with whichever letter labels ``shape`` in *this* prompt."""
+    options = dict((body.strip(), letter)
+                   for letter, body in re.findall(r"\((\w)\) (.+)", prompt))
+    return f"ANSWER: ({options[shape]})"
+
+
 # ── 1. Answer helpers ──────────────────────────────────────────────────────────
 class TestAnswerHelpers(unittest.TestCase):
 
@@ -95,6 +107,11 @@ class TestAnswerHelpers(unittest.TestCase):
         self.assertFalse(answers_equal("18", "20"))
         self.assertTrue(answers_equal("kite", "Kite."))
 
+    def test_numeric_literals_are_compared_as_a_multiset(self):
+        self.assertEqual(numeric_literals("5 apples and 3.0 pears"), ["3", "5"])
+        self.assertEqual(numeric_literals("3 pears, 5 apples"), ["3", "5"])
+        self.assertNotEqual(numeric_literals("5 apples"), numeric_literals("6 apples"))
+
 
 # ── 2. Multiple-choice relabelling ─────────────────────────────────────────────
 class TestOptionRelations(unittest.TestCase):
@@ -109,6 +126,12 @@ class TestOptionRelations(unittest.TestCase):
         self.assertEqual(variant.pullback("(A)"), "(C)")
         self.assertTrue(variant.holds("(C)", "(A)"))
         self.assertFalse(variant.holds("(C)", "(B)"))
+
+    def test_expected_for_is_the_forward_map_used_by_the_witness(self):
+        rel = _relation("bigbenchhard", "options_shift1")
+        variant = rel.apply(GEOMETRY_Q, "(C)")
+        # phi(a): answering (C) originally must mean answering (A) on the variant.
+        self.assertEqual(variant.expected_value("(C)"), "(A)")
 
     def test_reverse_is_its_own_inverse(self):
         rel = _relation("bigbenchhard", "options_reverse")
@@ -128,7 +151,7 @@ class TestOptionRelations(unittest.TestCase):
         self.assertIsNone(rel.apply("What is 2 + 2?", "4"))
 
 
-# ── 3. SVG relations ───────────────────────────────────────────────────────────
+# ── 3. SVG relations and the mechanical invariant ──────────────────────────────
 class TestSvgRelations(unittest.TestCase):
 
     def _coords(self, text: str):
@@ -166,6 +189,21 @@ class TestSvgRelations(unittest.TestCase):
         arc = 'This SVG path element <path d="M 1.00,2.00 A 5.00,5.00 0 0 1 9.00,9.00"/> draws a'
         self.assertIsNone(rel.apply(arc, "(A)"))
 
+    def test_shape_invariant_compares_both_sides_mechanically(self):
+        rel = _relation("bigbenchhard", "shape_vertex_count", "geometric_shapes")
+        self.assertEqual(rel.family, "inv")
+        # The path closes on 3 vertices, so 'triangle' agrees and 'kite' does not.
+        expected, observed, _ = rel.invariant(GEOMETRY_Q, "(C)")
+        self.assertEqual(expected, observed)
+        expected, observed, detail = rel.invariant(GEOMETRY_Q, "(B)")
+        self.assertNotEqual(expected, observed)
+        self.assertIn("kite", detail)
+
+    def test_shape_invariant_abstains_when_not_comparable(self):
+        rel = _relation("bigbenchhard", "shape_vertex_count", "geometric_shapes")
+        self.assertIsNone(rel.invariant(GEOMETRY_Q, "(A)"))       # circle: no vertices
+        self.assertIsNone(rel.invariant("no path here\n(A) kite", "(A)"))
+
 
 # ── 4. Word-problem relations ──────────────────────────────────────────────────
 class TestWordProblemRelations(unittest.TestCase):
@@ -179,18 +217,37 @@ class TestWordProblemRelations(unittest.TestCase):
         self.assertTrue(variant.holds("8", "16"))
         self.assertFalse(variant.holds("8", "8"))
         self.assertEqual(variant.pullback("16"), "8")
+        self.assertEqual(variant.expected_value("8"), "16")      # phi(a) = 2a
 
     def test_scaling_abstains_when_an_answer_is_not_numeric(self):
         variant = _relation("mgsm", "scale_quantities_x3").apply(self.Q, "8")
         self.assertTrue(variant.holds("8", "no idea"))
 
-    def test_masking_is_backward_verification(self):
-        variant = _relation("mgsm", "mask_quantity").apply(self.Q, "8")
+    def test_slots_are_the_stated_quantities(self):
+        slots = enumerate_slots("Tom has 5 apples and 3 pears. He pays 12 dollars.")
+        self.assertEqual([s.text for s in slots], ["5", "3", "12"])
+
+    def test_backward_substitution_masks_a_slot_for_pi_mask(self):
+        rel = _relation("mgsm", "mask_quantity")
+        self.assertEqual(rel.family, "bwd")
+        self.assertIsNone(rel.apply)                   # driver-slotted, not plain T
+        variant = rel.apply_slot(self.Q, "8", 0)
         self.assertIn("Tom has X apples", variant.question)
-        self.assertIn("8", variant.question)          # the candidate is the input here
+        # The candidate is pi_mask's own slot, not part of the masked problem.
+        self.assertNotIn("8", variant.question)
+        self.assertEqual(variant.slot, "5")
+        self.assertEqual(variant.expected, "5")
         self.assertIsNone(variant.pullback)            # answers a different question
         self.assertTrue(variant.holds("8", "5"))
         self.assertFalse(variant.holds("8", "6"))
+        self.assertTrue(variant.holds("8", UNDETERMINED))   # abstains, never refutes
+
+    def test_next_slot_walks_distinct_quantities(self):
+        rel = _relation("mgsm", "mask_quantity")
+        q = "Tom has 5 apples and 3 pears. How many pieces of fruit does he have?"
+        self.assertEqual(rel.apply_slot(q, "8", 0).slot, "5")
+        self.assertEqual(rel.apply_slot(q, "8", 1).slot, "3")
+        self.assertEqual(rel.apply_slot(q, "8", 2).slot, "5")   # wraps around
 
     def test_premise_permutation_is_guarded_against_dependent_sentences(self):
         rel = _relation("mgsm", "permute_premises")
@@ -227,8 +284,8 @@ class TestCodeRelations(unittest.TestCase):
         self.assertIsNone(_relation("cruxeval", "rename_identifiers").apply(broken, "1"))
 
 
-# ── 6. Catalogue selection ─────────────────────────────────────────────────────
-class TestCatalogue(unittest.TestCase):
+# ── 6. Library selection ───────────────────────────────────────────────────────
+class TestLibrary(unittest.TestCase):
 
     def test_has_checker_is_fixed_per_benchmark(self):
         self.assertTrue(has_checker("gameof24"))
@@ -247,9 +304,17 @@ class TestCatalogue(unittest.TestCase):
         self.assertTrue(all(r.name.startswith("options_")
                             for r in get_catalogue("no_such_benchmark")))
 
-    def test_relations_filter_restricts_the_catalogue(self):
+    def test_relations_filter_restricts_the_library(self):
         cat = get_catalogue("mgsm", None, ["mask_quantity"])
         self.assertEqual([r.name for r in cat], ["mask_quantity"])
+
+    def test_libraries_are_ordered_by_soundness_rung(self):
+        """Falsify returns on the first violation, so ordering is load-bearing."""
+        mgsm = [r.name for r in get_catalogue("mgsm")]
+        self.assertEqual(mgsm[0], "mask_quantity")          # backward first
+        self.assertTrue(mgsm[-1].startswith("scale_"))      # covariant last
+        geo = get_catalogue("bigbenchhard", "geometric_shapes")
+        self.assertEqual(geo[0].family, "inv")              # free check first
 
 
 # ── 7. pi_mr-gen (ablation) ────────────────────────────────────────────────────
@@ -264,7 +329,25 @@ class TestGeneratedCatalogue(unittest.TestCase):
         self.assertIsNone(cat[0].apply)
 
 
-# ── 8. Trusted checkers ────────────────────────────────────────────────────────
+# ── 8. Parsers and the voted derivation ────────────────────────────────────────
+class TestParsersAndVoting(unittest.TestCase):
+
+    def test_derived_parsing_and_the_undetermined_escape(self):
+        self.assertEqual(_parse_derived("...\nDERIVED: 4"), "4")
+        self.assertEqual(_parse_derived("DERIVED: UNDETERMINED"), UNDETERMINED)
+        self.assertEqual(_parse_derived("I cannot tell."), UNDETERMINED)
+
+    def test_majority_returns_the_plurality_value(self):
+        self.assertEqual(_majority(["4", "4", "5"]), "4")
+        self.assertEqual(_majority(["4", "The answer is 4", "5"]), "4")
+
+    def test_majority_abstains_on_a_tie_or_an_undetermined_win(self):
+        self.assertIsNone(_majority(["4", "5"]))
+        self.assertIsNone(_majority([UNDETERMINED, UNDETERMINED, "5"]))
+        self.assertEqual(_majority([UNDETERMINED, "5", "5"]), "5")
+
+
+# ── 9. Trusted checkers ────────────────────────────────────────────────────────
 class TestCheckers(unittest.TestCase):
 
     def test_gameof24_verdicts(self):
@@ -284,7 +367,7 @@ class TestCheckers(unittest.TestCase):
             multistep_arithmetic_checker("How many apples?", "3").verdict, "undecided")
 
 
-# ── 9. Executable regime ───────────────────────────────────────────────────────
+# ── 10. Executable regime ──────────────────────────────────────────────────────
 class TestExecutableRegime(unittest.TestCase):
 
     Q = "((1 + 1) * 3) ="
@@ -306,6 +389,16 @@ class TestExecutableRegime(unittest.TestCase):
         self.assertTrue(response.metadata["accepted_fixpoint"])
         self.assertEqual(response.metadata["regime"], "executable")
         self.assertEqual(response.metadata["repairs_used"], 1)
+        self.assertTrue(response.metadata["witnesses"][0]["sound"])
+
+    def test_one_probe_settles_a_deterministic_checker(self):
+        """m is forced to 1: re-probing c_q could only repeat the same verdict."""
+        llm = ScriptedLLM(lambda p, i: "ANSWER: 6" if i == 0 else "PROBE: recompute")
+        fot = FoT(llm, task="bigbenchhard", subtask="multistep_arithmetic_two",
+                  survival=5)
+        response = fot.run(self.Q)
+        self.assertEqual(response.metadata["survival"], 1)
+        self.assertEqual(response.num_llm_calls, 2)     # Solve + one probe
 
     def test_no_checker_run_when_execution_is_disabled(self):
         fot = FoT(ScriptedLLM(lambda p, i: "ANSWER: 6"), task="gameof24",
@@ -314,37 +407,40 @@ class TestExecutableRegime(unittest.TestCase):
         self.assertFalse(fot._has_checker)
 
 
-# ── 10. Metamorphic regime ─────────────────────────────────────────────────────
-class TestMetamorphicRegime(unittest.TestCase):
+# ── 11. Relational regime ──────────────────────────────────────────────────────
+class TestRelationalRegime(unittest.TestCase):
 
     def _fot(self, respond, **kwargs):
+        kwargs.setdefault("votes", 1)
         llm = ScriptedLLM(respond)
         return FoT(llm, task="bigbenchhard", subtask="geometric_shapes", **kwargs), llm
 
-    @staticmethod
-    def _answer_shape(prompt: str, shape: str) -> str:
-        """Answer with whichever letter labels ``shape`` in *this* prompt."""
-        options = dict((body.strip(), letter)
-                       for letter, body in re.findall(r"\((\w)\) (.+)", prompt))
-        return f"ANSWER: ({options[shape]})"
-
-    def test_orbit_disagreement_refutes_and_repairs(self):
+    def test_disagreement_refutes_and_drives_a_repair(self):
         def respond(prompt: str, i: int) -> str:
-            if i == 0:                                  # the original solve
-                return self._answer_shape(prompt, "kite")
-            return self._answer_shape(prompt, "triangle")
+            return _answer_shape(prompt, "kite" if i == 0 else "triangle")
 
-        fot, llm = self._fot(respond, budget=1)
+        fot, _ = self._fot(respond, budget=1, relations=["options_shift1"])
         response = fot.run(GEOMETRY_Q)
         self.assertEqual(response.metadata["repairs_used"], 1)
-        self.assertEqual(response.metadata["falsification_regimes"], ["metamorphic"])
-        self.assertGreaterEqual(len(response.metadata["witness_history"]), 1)
+        self.assertEqual(response.metadata["falsification_regimes"], ["relational"])
+        self.assertEqual(response.metadata["witnesses"][0]["family"], "mr")
+        self.assertFalse(response.metadata["witnesses"][0]["sound"])
+
+    def test_invariant_witness_costs_no_model_call(self):
+        """rho_inv: the comparator computes both sides straight from the data."""
+        llm = ScriptedLLM(lambda p, i: _answer_shape(p, "kite"))
+        fot = FoT(llm, task="bigbenchhard", subtask="geometric_shapes",
+                  budget=1, relations=["shape_vertex_count"])
+        response = fot.run(GEOMETRY_Q)
+        self.assertEqual(response.metadata["witnesses"][0]["family"], "inv")
+        self.assertEqual(response.metadata["witnesses"][0]["votes"], 0)
+        self.assertEqual(response.num_llm_calls, 2)     # Solve + Repair only
 
     def test_follow_up_solves_never_see_the_candidate(self):
         def respond(prompt: str, i: int) -> str:
-            return self._answer_shape(prompt, "kite" if i == 0 else "triangle")
+            return _answer_shape(prompt, "kite" if i == 0 else "triangle")
 
-        fot, llm = self._fot(respond, budget=1)
+        fot, llm = self._fot(respond, budget=1, relations=["options_shift1"])
         fot.run(GEOMETRY_Q)
         variant_prompts = [p for p in llm.prompts if "Solve the following problem" in p]
         self.assertGreater(len(variant_prompts), 1)
@@ -352,43 +448,108 @@ class TestMetamorphicRegime(unittest.TestCase):
             self.assertNotIn("Candidate answer", prompt)
             self.assertNotIn("Previous answer", prompt)
 
-    def test_tau_blocks_a_single_violation(self):
-        """One dissenting variant is a defect somewhere in the orbit, not against a."""
+    def test_a_tied_vote_abstains_instead_of_refuting(self):
+        """One dissenting sample out of two is a tie: Majority abstains."""
         state = {"n": 0}
 
         def respond(prompt: str, i: int) -> str:
             if "Solve the following problem" not in prompt:
                 return "ANSWER: (B)"
             state["n"] += 1
-            # Only the first variant dissents; the rest agree with the candidate.
-            shape = "triangle" if state["n"] == 2 else "kite"
-            return self._answer_shape(prompt, shape)
+            if state["n"] == 1:
+                return _answer_shape(prompt, "kite")            # the candidate
+            return _answer_shape(prompt, "triangle" if state["n"] == 2 else "kite")
 
-        fot, _ = self._fot(respond, budget=1)
+        fot, _ = self._fot(respond, budget=1, votes=2, survival=1,
+                           relations=["options_shift1"])
         response = fot.run(GEOMETRY_Q)
         self.assertTrue(response.metadata["accepted_fixpoint"])
         self.assertEqual(response.metadata["repairs_used"], 0)
 
-    def test_majority_rule_protects_a_candidate_the_orbit_agrees_with(self):
-        """Two dissenters that also disagree with each other must not trigger repair."""
-        state = {"n": 0}
-        shapes = ["kite", "triangle", "circle", "kite"]
+    def test_undetermined_majority_abstains(self):
+        """Under-determination must never masquerade as a refutation."""
+        def respond(prompt: str, i: int) -> str:
+            if "DERIVED:" in prompt:
+                return "DERIVED: UNDETERMINED"
+            return "ANSWER: 8"
+
+        llm = ScriptedLLM(respond)
+        fot = FoT(llm, task="mgsm", budget=1, survival=1, votes=3,
+                  relations=["mask_quantity"])
+        response = fot.run("Tom has 5 apples. How many apples does Tom have?")
+        self.assertTrue(response.metadata["accepted_fixpoint"])
+        self.assertEqual(response.final_answer, "8")
+
+    def test_backward_witness_reproduces_the_papers_micro_example(self):
+        q = ("A ticket costs 5 dollars. Tom buys 3 tickets and pays with a "
+             "20-dollar bill. How much change does he get?")
 
         def respond(prompt: str, i: int) -> str:
-            if "Solve the following problem" not in prompt:
-                return "ANSWER: (B)"
-            shape = shapes[min(state["n"], len(shapes) - 1)]
-            state["n"] += 1
-            return self._answer_shape(prompt, shape)
+            if "DERIVED:" in prompt:
+                return "DERIVED: 4" if "costs X dollars" in prompt else "DERIVED: 20"
+            if "Previous answer" in prompt:
+                return "ANSWER: 5"
+            return "ANSWER: 8"
 
-        fot, _ = self._fot(respond, budget=1)
-        response = fot.run(GEOMETRY_Q)
+        llm = ScriptedLLM(respond)
+        response = FoT(llm, task="mgsm", budget=1, survival=1, votes=1,
+                       relations=["mask_quantity"]).run(q)
+        self.assertEqual(response.final_answer, "5")
+        witness = response.metadata["witnesses"][0]
+        self.assertEqual((witness["family"], witness["expected"], witness["observed"]),
+                         ("bwd", "5", "4"))
+        # pi_mask takes the candidate as given and asks for a value, not a verdict.
+        mask_prompt = next(p for p in llm.prompts if "DERIVED:" in p)
+        self.assertIn("Your job is NOT to judge the candidate answer", mask_prompt)
+        self.assertIn("Candidate final answer (take as given):", mask_prompt)
+
+    def test_successive_attempts_draw_distinct_checks(self):
+        """Surviving m attempts means surviving m *different* mechanical checks."""
+        q = "Tom has 5 apples and 3 pears. How many pieces of fruit does he have?"
+
+        def respond(prompt: str, i: int) -> str:
+            return "DERIVED: UNDETERMINED" if "DERIVED:" in prompt else "ANSWER: 8"
+
+        llm = ScriptedLLM(respond)
+        FoT(llm, task="mgsm", budget=1, survival=2, votes=1,
+            relations=["mask_quantity"]).run(q)
+        masked = [p for p in llm.prompts if "DERIVED:" in p]
+        self.assertEqual(len(masked), 2)
+        self.assertIn("X apples and 3 pears", masked[0])   # first slot
+        self.assertIn("5 apples and X pears", masked[1])   # NextSlot moved on
+
+    def test_model_applied_variant_is_rejected_when_it_drops_a_quantity(self):
+        """pi_mr output is mechanically validated before it is ever checked."""
+        thai = "เป็ดของเจเน็ตวางไข่วันละ 16 ฟอง คำถาม"
+
+        def respond(prompt: str, i: int) -> str:
+            if "VARIANT:" in prompt:
+                return "VARIANT: Janet's ducks lay eggs every day. Question\nRELATION: same"
+            return "ANSWER: 18"
+
+        llm = ScriptedLLM(respond)
+        response = FoT(llm, task="mgsm", relations=["translate_to_english"],
+                       budget=1, survival=1, votes=1).run(thai)
         self.assertTrue(response.metadata["accepted_fixpoint"])
+        # Solve + pi_mr only: the variant was discarded, so it was never solved.
+        self.assertEqual(response.num_llm_calls, 2)
 
-        # The pilot's asymmetry (tau=1, no majority test) refutes the same orbit.
-        state["n"] = 0
-        fot, _ = self._fot(respond, budget=1, tau=1, use_majority=False)
-        self.assertEqual(fot.run(GEOMETRY_Q).metadata["repairs_used"], 1)
+    def test_model_applied_relation_uses_pi_mr(self):
+        thai = "เป็ดของเจเน็ตวางไข่วันละ 16 ฟอง คำถาม"
+
+        def respond(prompt: str, i: int) -> str:
+            if "VARIANT:" in prompt:
+                return ("VARIANT: Janet's ducks lay 16 eggs a day. Question\n"
+                        "RELATION: same")
+            return "ANSWER: 18"
+
+        llm = ScriptedLLM(respond)
+        fot = FoT(llm, task="mgsm", relations=["translate_to_english"], budget=1,
+                  votes=1)
+        fot.run(thai)
+        mr_prompts = [p for p in llm.prompts if "VARIANT:" in p]
+        self.assertEqual(len(mr_prompts), 1)
+        self.assertIn("Do NOT solve", mr_prompts[0])
 
     def test_no_applicable_relation_degenerates_to_solve(self):
         llm = ScriptedLLM(lambda p, i: "ANSWER: 4")
@@ -398,29 +559,14 @@ class TestMetamorphicRegime(unittest.TestCase):
         self.assertEqual(response.num_llm_calls, 1)
         self.assertTrue(response.metadata["accepted_fixpoint"])
 
-    def test_model_applied_relation_uses_pi_mr(self):
-        thai = "เป็ดของเจเน็ตวางไข่วันละ 16 ฟอง คำถาม"
 
-        def respond(prompt: str, i: int) -> str:
-            if "VARIANT:" in prompt:
-                return "VARIANT: Janet's ducks lay 16 eggs a day. Question\nRELATION: same"
-            return "ANSWER: 18"
-
-        llm = ScriptedLLM(respond)
-        fot = FoT(llm, task="mgsm", relations=["translate_to_english"], budget=1)
-        fot.run(thai)
-        mr_prompts = [p for p in llm.prompts if "VARIANT:" in p]
-        self.assertEqual(len(mr_prompts), 1)
-        self.assertIn("Do NOT solve", mr_prompts[0])
-
-
-# ── 11. Driver loop ────────────────────────────────────────────────────────────
+# ── 12. Driver loop ────────────────────────────────────────────────────────────
 class TestDriver(unittest.TestCase):
 
     Q = "((1 + 1) * 3) ="
 
-    def test_budget_exhaustion_stops_after_k_rounds(self):
-        """A candidate that is refuted every round costs exactly K repairs."""
+    def test_budget_exhaustion_returns_the_last_candidate(self):
+        """Algorithm 4, line 12: a candidate refuted every round costs K repairs."""
         state = {"n": 0}
 
         def respond(prompt: str, i: int) -> str:
@@ -435,29 +581,27 @@ class TestDriver(unittest.TestCase):
         self.assertFalse(response.metadata["accepted_fixpoint"])
         self.assertEqual(response.metadata["repairs_used"], 2)
         self.assertTrue(response.metadata["budget_exhausted"])
-        # Every archived candidate was soundly refuted except the last, so the
-        # last one is returned rather than a provably wrong earlier answer.
+        self.assertEqual(response.metadata["returned"], "last")
         self.assertEqual(response.final_answer, "103")
 
-    def test_archive_floors_the_metamorphic_regime_at_solve(self):
-        """With no candidate ever corroborated, the initial answer is the floor."""
-        state = {"n": 0}
-        shapes = ["kite", "triangle", "triangle", "triangle",   # round 1 refutes kite
-                  "circle",                                      # repair 1
-                  "kite", "kite", "kite",                        # round 2 refutes circle
-                  "triangle"]                                    # repair 2 (untested)
+    def test_archive_ablation_returns_the_best_corroborated_candidate(self):
+        """--fot_archive: the initial answer, which withstood a check, is the floor."""
+        state = {"solves": 0, "repairs": 0}
+        solves = ["kite", "kite", "triangle", "triangle"]
+        repairs = ["(A)", "(C)"]                       # circle, then triangle
 
         def respond(prompt: str, i: int) -> str:
-            if "Solve the following problem" not in prompt and "Original problem" not in prompt:
-                return "ANSWER: (B)"
-            shape = shapes[min(state["n"], len(shapes) - 1)]
-            state["n"] += 1
-            options = dict((b.strip(), a) for a, b in re.findall(r"\((\w)\) (.+)", prompt))
-            return f"ANSWER: ({options[shape]})"
+            if "Previous answer" in prompt:
+                out = repairs[min(state["repairs"], len(repairs) - 1)]
+                state["repairs"] += 1
+                return f"ANSWER: {out}"
+            shape = solves[min(state["solves"], len(solves) - 1)]
+            state["solves"] += 1
+            return _answer_shape(prompt, shape)
 
         llm = ScriptedLLM(respond)
-        response = FoT(llm, task="bigbenchhard", subtask="geometric_shapes",
-                       budget=2).run(GEOMETRY_Q)
+        response = FoT(llm, task="bigbenchhard", budget=2, survival=3, votes=1,
+                       archive=True).run(GEOMETRY_Q)
         self.assertTrue(response.metadata["budget_exhausted"])
         self.assertEqual(response.metadata["returned"], "archive")
         self.assertEqual(response.final_answer, "(B)")          # kite: the Solve answer
@@ -466,18 +610,37 @@ class TestDriver(unittest.TestCase):
         llm = ScriptedLLM(lambda p, i: "ANSWER: 6")
         response = FoT(llm, task="bigbenchhard",
                        subtask="multistep_arithmetic_two").run(self.Q)
-        for key in ("task", "subtask", "regime", "has_checker", "catalogue",
-                    "accepted_fixpoint", "returned", "budget", "probes", "tau",
-                    "use_majority", "repairs_used", "budget_exhausted",
-                    "execute_code", "falsification_regimes", "witness_history"):
+        for key in ("task", "subtask", "regime", "has_checker", "library",
+                    "accepted_fixpoint", "returned", "budget", "survival", "votes",
+                    "repairs_used", "budget_exhausted", "execute_code",
+                    "initial_answer", "answer_changed", "witnesses",
+                    "falsification_regimes", "witness_history"):
             self.assertIn(key, response.metadata)
         self.assertEqual(response.baseline_type, "FoT")
+        self.assertEqual(response.metadata["initial_answer"], "6")
+        self.assertFalse(response.metadata["answer_changed"])
 
     def test_counters_reset_between_questions(self):
         llm = ScriptedLLM(lambda p, i: "ANSWER: 6")
         fot = FoT(llm, task="bigbenchhard", subtask="multistep_arithmetic_two")
         first = fot.run(self.Q).num_llm_calls
         second = fot.run(self.Q).num_llm_calls
+        self.assertEqual(first, second)
+
+    def test_falsifier_cursors_reset_between_questions(self):
+        """Next / NextSlot rewind per question, so run order is reproducible."""
+        def respond(prompt: str, i: int) -> str:
+            return "DERIVED: UNDETERMINED" if "DERIVED:" in prompt else "ANSWER: 8"
+
+        llm = ScriptedLLM(respond)
+        fot = FoT(llm, task="mgsm", budget=1, survival=1, votes=1,
+                  relations=["mask_quantity"])
+        q = "Tom has 5 apples and 3 pears. How many pieces of fruit does he have?"
+        fot.run(q)
+        first = [p for p in llm.prompts if "DERIVED:" in p][-1]
+        llm.prompts.clear()
+        fot.run(q)
+        second = [p for p in llm.prompts if "DERIVED:" in p][-1]
         self.assertEqual(first, second)
 
 

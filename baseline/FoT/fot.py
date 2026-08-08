@@ -1,23 +1,32 @@
 """
-Falsification-of-Thought (FoT): reasoning by metamorphic self-refutation.
+Falsification-of-Thought (FoT): reasoning by self-refutation with relational
+falsification.
 
 FoT makes *self-refutation* the engine of reasoning. Instead of generating and
 selecting, it generates a candidate and then repeatedly tries to *break* it,
-using each successful break to drive a targeted repair. The guiding principle is
-to **refute by construction, not by verdict**: the model is refuted by its own
-outputs, never by its own self-assessment.
+using each successful break to drive a targeted repair. The design invariant that
+runs through every operator is:
+
+    The model constructs; a deterministic procedure decides.
+
+No prompt in FoT asks "is this correct?". The model only ever produces
+*objects* — an initial answer, a probe, a re-derived quantity, a solution to a
+transformed problem — and every accept/refute decision is issued by an executable
+checker c_q or by a deterministic comparator applied to model-produced values.
 
 The driver loop (Algorithm 4 of the paper):
 
-    a ← Solve(q); H ← ∅; S ← {(a, 0)}      # candidate; witness history; archive
+    a ← Solve(q); H ← ∅                     # initial candidate; witness history
     for k in 1..K:                          # budget K
-        w ← Falsify(q, a)                   # executable or metamorphic witness
+        w ← ⊥
+        for j in 1..m:                      # survival threshold m
+            w ← Falsify(q, a)               # ONE probe / relation instance
+            if w ≠ ⊥: break
         if w = ⊥:
-            return a                        # survived falsification: accept fixpoint
+            return a                        # survived m distinct checks: fixpoint
         H ← H ∪ {w}
         a ← Repair(q, a, w, H)              # witness-guided repair
-        S ← S ∪ {(a, rounds survived)}
-    return argmax_{(a,s) ∈ S} s             # budget exhausted: best-surviving candidate
+    return a                                # budget exhausted: last candidate
 
 FoT composes three operators, each a prompt to a single frozen model M:
 
@@ -29,64 +38,84 @@ The falsifier (Algorithm 2) operates in one of two regimes, selected by the
 task-level predicate ``HasChecker(q)`` — FIXED PER BENCHMARK, not decided at run
 time by the model (see :mod:`baseline.FoT.checkers`):
 
-  * **Executable falsification** — when the benchmark exposes a cheap, decisive
-    checker c_q (arithmetic evaluation for Game of 24 and BBH multi-step
-    arithmetic, program execution for CRUXEval, ``sat`` for Python Puzzles). The
-    model only *proposes a probe* (pi_probe) — it is forbidden to give a verdict;
-    the trusted external c_q decides. A failure is therefore a SOUND witness.
+  * **Executable regime** — when the benchmark exposes a cheap, decisive checker
+    c_q (arithmetic evaluation for Game of 24 and BBH multi-step arithmetic,
+    program execution for CRUXEval, ``sat`` for Python Puzzles). The model only
+    *proposes a probe* (pi_probe) — it is forbidden to give a verdict; the trusted
+    external c_q decides. A failure is therefore a SOUND witness.
 
-  * **Metamorphic falsification** — when no checker exists. The query is
-    transformed by a fixed catalogue C of semantics-preserving relations
-    (:mod:`baseline.FoT.relations`), each variant is solved *independently*, and
-    the witness is a concrete disagreement inside the resulting orbit of answers.
-    By Proposition 1 a violated valid relation certifies that at least one answer
-    in the orbit is wrong, with no appeal to the model's self-assessment: the
-    residual unsoundness moves from an unauditable per-instance hallucination to
-    the design-time validity of C.
+  * **Relational regime** — when no checker exists. The query is attacked with a
+    small, human-audited library R_q of relation schemas
+    (:mod:`baseline.FoT.relations`) drawn from the paper's three families:
+    backward substitution (rho_bwd — mask a stated quantity, re-derive it *from*
+    the candidate through pi_mask), metamorphic transformation (rho_mr —
+    transform the query, solve the follow-up independently with pi_solve, compare
+    the pair against phi), and mechanical invariants (rho_inv — the comparator
+    computes both sides itself and no model call is made at all). The witness is
+    the mechanically exhibited contradiction ⟨rho, instance, (expected,
+    observed)⟩.
 
-Three design decisions carry the weight of the metamorphic branch:
+Four design decisions carry the weight of the relational branch:
 
-  * *Independence* (Remark 1) — the candidate never appears in the prompt that
-    solves a variant, so the follow-up answer is evidence rather than an echo.
-    This is structural: pi_solve simply has no candidate slot.
-  * *Directionality* (Remark 2) — every relation in C must be non-decreasing in
-    reliability, so a disagreement is more likely to indict a than a'.
-  * *Corroboration* (Remark 3) — repair fires only when at least τ relations are
-    violated **and** a is outside the majority of the orbit. The pilot's inverted
-    asymmetry (one violation triggers repair, unanimity required to accept) is
-    recovered as an ablation with ``tau=1`` and ``use_majority=False``.
+  * *Voted derivation* — the single model-produced value in a relational check is
+    the majority over ``s`` independent completions; ties and an UNDETERMINED
+    majority abstain. This converts "one bad sample can refute a correct answer"
+    into "a false refutation requires a systematic majority error on a short,
+    tightly constrained derivation".
+  * *Independence* — for rho_mr the candidate never appears in the prompt that
+    solves the follow-up, so its answer is evidence rather than an echo. This is
+    structural: pi_solve simply has no candidate slot.
+  * *Distinctness* — successive attempts cycle through distinct relations and
+    distinct masked slots (Next, NextSlot), so surviving m attempts means
+    surviving m *different* mechanical checks, not m re-rolls of one check.
+  * *Attribution* — a metamorphic witness implicates the pair (a, a_f), so pi_rep
+    explicitly licenses the model to defend its answer and blame the follow-up.
 
 This replaces the pilot's assertion-based semantic regime (pi_nec + pi_chk and the
 ``ReCheckable`` guard), in which the model asserted that the candidate violated a
 self-generated necessary condition — sound-looking but, being a verdict on its own
 work, the source of the MGSM regression reported in the paper. There is no
-judgement template in the metamorphic branch: rho(a, a') is evaluated by the
-driver, not by the model.
+judgement template anywhere in FoT: phi is evaluated by the driver.
 
-Cost: O(K·(1+n)) model calls (n = probes per round), the same order as the pilot
-and far below the recursive expansion of ToT/GoT.
+Cost: O(K·(1 + m·s)) model calls, with small constants (K=3, m=3, s=5 in the
+paper's experiments) — every call a short completion, and far below the recursive
+expansion of ToT/GoT. The executable regime costs O(K·2): one probe settles the
+verdict, because every checker is deterministic and probe-independent.
 
-Reference: "Falsification-of-Thought: Reasoning by Metamorphic Self-Refutation".
+Reference: "Falsification-of-Thought: Reasoning by Self-Refutation with
+Relational Falsification".
 """
 
 from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from baseline.basebaseline import BaseBaseline, BaselineResponse
 from baseline.FoT.checkers import CheckResult, Checker, get_checker
 from baseline.FoT.relations import (
     Relation,
     Variant,
+    enumerate_slots,
     equality_variant,
     get_catalogue,
     normalize_answer,
+    numeric_literals,
     parse_generated_catalogue,
 )
 from models.base import BaseLLM
+
+
+# The abstention token of pi_mask: the slot is not identifiable from the
+# candidate, so the check must not be turned into a refutation.
+UNDETERMINED = "UNDETERMINED"
+
+# How many passes over R_q Next() may make before declaring it exhausted. One
+# pass per attempt is not enough because rho_bwd yields a *new* instance (a new
+# masked slot) every time it is drawn.
+_MAX_LIBRARY_PASSES = 4
 
 
 # ── Tagged-output parsers (Extract) ─────────────────────────────────────────────
@@ -117,10 +146,25 @@ def _parse_probe(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+def _parse_derived(text: str) -> str:
+    """Parse the ``DERIVED:`` line (pi_mask output).
+
+    Anything unparseable is folded into UNDETERMINED rather than guessed at: a
+    completion the driver cannot read must abstain, never refute.
+    """
+    matches = list(re.finditer(r"DERIVED:\s*(.+)", text, re.IGNORECASE))
+    if not matches:
+        return UNDETERMINED
+    value = matches[-1].group(1).strip().rstrip(".")
+    if not value or value.upper().startswith(UNDETERMINED):
+        return UNDETERMINED
+    return value
+
+
 def _parse_variant(text: str) -> str:
     """Parse the ``VARIANT:`` block (pi_mr output); ``RELATION:`` ends it.
 
-    The relation line is ignored on purpose: rho comes from the catalogue, which
+    The relation line is ignored on purpose: phi comes from the library, which
     was audited at design time, never from what the model says about it here.
     """
     m = re.search(r"VARIANT:\s*(.*?)(?=^\s*RELATION:|\Z)", text,
@@ -128,35 +172,80 @@ def _parse_variant(text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _majority(values: List[str]) -> Optional[str]:
+    """Majority(v_1..v_s): the plurality value, or None if the vote abstains.
+
+    Abstains on a tie and whenever UNDETERMINED wins, which is what makes
+    under-determination unable to masquerade as a refutation.
+    """
+    counts: Dict[str, int] = {}
+    representative: Dict[str, str] = {}
+    for value in values:
+        key = UNDETERMINED if value == UNDETERMINED else normalize_answer(value)
+        counts[key] = counts.get(key, 0) + 1
+        representative.setdefault(key, value)
+    if not counts:
+        return None
+    top = max(counts.values())
+    winners = [k for k, c in counts.items() if c == top]
+    if len(winners) != 1 or winners[0] == UNDETERMINED:
+        return None
+    return representative[winners[0]]
+
+
 @dataclass
 class Witness:
     """A constructive artifact demonstrating that a candidate is wrong.
 
+    The witness is w = ⟨rho, instance, (expected, observed)⟩ — every component is
+    either quoted from q, produced by the driver, or a voted model value, and the
+    verdict inside it was issued by Compare, not by the model.
+
     Attributes:
-        text: human-readable, self-contained description of the failure, used for
-            the witness history H and for the run metadata.
+        text: the self-contained rendering that fills pi_rep's <witness> slot and
+            the witness history H.
         sound: True iff produced by the executable regime, where the trusted
             external checker c_q reported a real failure — in which case it
-            certifies the candidate is incorrect. A metamorphic witness is sound
-            only *relative to the relation* (Proposition 1): it certifies that
-            some answer in the orbit is wrong, not necessarily the candidate's.
-        regime: "executable" or "metamorphic".
-        orbit_block: the <orbit> slot of pi_rep — the equivalent formulations and
-            the answers they received (executable: the probe and the checker's
-            detail d).
-        relations_block: the <relations> slot of pi_rep.
-        violations: names of the relations that were violated.
-        satisfied: how many probes of this round the candidate survived (the
-            archive's corroboration score).
+            certifies the candidate is incorrect. A relational witness sits lower
+            on the soundness ladder (§3.6): it is sound conditional on the
+            relation's validity and, for rho_mr, implicates the *pair*.
+        regime: "executable" or "relational".
+        family: "checker" | "bwd" | "mr" | "inv" — the schema family, reported so
+            that witness precision can be broken down per family.
+        relation: name of the relation (or "checker") that produced it.
+        expected: what the check required.
+        observed: what was actually produced.
+        instance: the check instance — the masked or transformed problem, or the
+            probe the checker ran. Empty for rho_inv, which has no instance.
+        votes: how many independent completions the observed value is a majority
+            over (0 when no model call was involved).
+        survived: how many distinct checks this candidate withstood before this
+            one refuted it.
     """
 
     text: str
     sound: bool
     regime: str
-    orbit_block: str = ""
-    relations_block: str = ""
-    violations: List[str] = field(default_factory=list)
-    satisfied: int = 0
+    family: str
+    relation: str
+    expected: str = ""
+    observed: str = ""
+    instance: str = ""
+    votes: int = 0
+    survived: int = 0
+
+    def record(self) -> Dict[str, Any]:
+        """Machine-readable summary for the run metadata (witness precision)."""
+        return {
+            "regime": self.regime,
+            "family": self.family,
+            "relation": self.relation,
+            "expected": self.expected,
+            "observed": self.observed,
+            "votes": self.votes,
+            "survived": self.survived,
+            "sound": self.sound,
+        }
 
 
 class FoT(BaseBaseline):
@@ -168,10 +257,10 @@ class FoT(BaseBaseline):
         task: Optional[str] = None,
         subtask: Optional[str] = None,
         budget: int = 3,
-        probes: int = 3,
-        tau: int = 2,
-        use_majority: bool = True,
+        survival: int = 3,
+        votes: int = 5,
         solve_temperature: float = 0.0,
+        vote_temperature: float = 0.7,
         falsify_temperature: float = 0.7,
         repair_temperature: float = 0.0,
         execute_code: bool = True,
@@ -179,32 +268,34 @@ class FoT(BaseBaseline):
         carry_witness_history: bool = True,
         relations: Optional[List[str]] = None,
         generate_relations: bool = False,
+        archive: bool = False,
     ) -> None:
         """Initialize the FoT baseline.
 
         Args:
             llm: An instance of a BaseLLM subclass.
             task: Benchmark name (e.g. "gameof24", "mgsm"). Selects the trusted
-                checker c_q and the relation catalogue C, fixing ``HasChecker(q)``
+                checker c_q and the relation library R_q, fixing ``HasChecker(q)``
                 for the whole run.
             subtask: Sub-benchmark, e.g. the BigBenchHard task name. Checker and
-                catalogue lookup are most-specific-first.
+                library lookup are most-specific-first.
             budget: K — maximum number of Falsify→Repair iterations.
-            probes: n — relations drawn from C per falsification round (the
-                executable regime always issues exactly one probe).
-            tau: τ — how many relations must be violated before a repair fires
-                (Remark 3). Ignored in the executable regime, where one sound
-                failure is decisive.
-            use_majority: Apply the orbit-majority acceptance rule: refuse to
-                repair a candidate that the bulk of the orbit agrees with.
-                ``tau=1, use_majority=False`` recovers the pilot's behaviour.
-            solve_temperature: Sampling temperature for Solve (initial and
-                variant solves).
+            survival: m — falsification attempts a candidate must survive before
+                it is accepted as a fixpoint. Each attempt draws a *distinct*
+                relation instance. Forced to 1 in the executable regime, where a
+                single probe already settles the verdict.
+            votes: s — independent completions the voted derivation takes the
+                majority over. Relational regime only.
+            solve_temperature: Sampling temperature for the initial Solve.
+            vote_temperature: Sampling temperature for the ``s`` completions of a
+                relational check (pi_mask, and the follow-up pi_solve). Must be
+                non-zero for the vote to carry information — at 0 a deterministic
+                backend returns ``s`` copies of one completion.
             falsify_temperature: Sampling temperature for the falsifier's own
-                calls (pi_probe, pi_mr).
+                construction calls (pi_probe, pi_mr).
             repair_temperature: Sampling temperature for witness-guided Repair.
             execute_code: If True, use the executable regime on benchmarks that
-                have a trusted checker c_q. If False, force the metamorphic
+                have a trusted checker c_q. If False, force the relational
                 regime everywhere. The checker runs the benchmark's own reference
                 code (CRUXEval functions, Python-Puzzles ``sat``) in a
                 timeout-bounded subprocess; disable on an untrusted host.
@@ -212,57 +303,90 @@ class FoT(BaseBaseline):
             carry_witness_history: If True, carry the history H of past witnesses
                 into Repair so fixes do not reintroduce previously resolved
                 failures (discouraging oscillation).
-            relations: Restrict C to these relation names (see
-                :mod:`baseline.FoT.relations`); None uses the whole catalogue.
-            generate_relations: Ablation — build C with pi_mr-gen from the first
-                question of the run instead of using the hand-written catalogue.
+            relations: Restrict R_q to these relation names (see
+                :mod:`baseline.FoT.relations`); None uses the whole library.
+            generate_relations: Ablation — build R_q with pi_mr-gen from the first
+                question of the run instead of using the hand-written library.
+            archive: Deviation from Algorithm 4, off by default. When True, budget
+                exhaustion returns the *best-surviving* candidate seen (dropping
+                any that a sound witness proved wrong) instead of the last step of
+                the walk.
         """
         super().__init__(llm, baseline_name="FoT")
         self.task = task
         self.subtask = subtask
         self.budget = budget
-        self.probes = probes
-        self.tau = tau
-        self.use_majority = use_majority
+        self.survival = survival
+        self.votes = votes
         self.solve_temperature = solve_temperature
+        self.vote_temperature = vote_temperature
         self.falsify_temperature = falsify_temperature
         self.repair_temperature = repair_temperature
         self.execute_code = execute_code
         self.code_timeout = code_timeout
         self.carry_witness_history = carry_witness_history
         self.generate_relations = generate_relations
+        self.archive = archive
 
         # HasChecker(q): fixed per benchmark, not decided at run time by the model.
         self._checker: Optional[Checker] = (
             get_checker(task, subtask) if execute_code else None)
         self._has_checker = self._checker is not None
 
-        # C: also fixed per benchmark. Empty in the executable regime, where the
+        # R_q: also fixed per benchmark. Empty in the executable regime, where the
         # checker decides and no relation is needed.
-        self._catalogue: List[Relation] = (
+        self._library: List[Relation] = (
             [] if self._has_checker else get_catalogue(task, subtask, relations))
         self._catalogue_generated = False
+
+        # Falsifier state (Next / NextSlot), reset per question.
+        self._rel_cursor = 0
+        self._slot_cursor = 0
+        self._seen: Set[Any] = set()
 
         # Context split (persona scoping): the answer-producing operators (Solve,
         # Repair) receive the full task framing + answer-format directives so their
         # output stays parseable; the falsifier's own calls receive only a one-line
         # task description, so the format persona never conflicts with "propose a
-        # probe" / "rewrite this problem".
+        # probe" / "re-derive X" / "rewrite this problem".
         self._solve_ctx = ""   # system_prompt + instruction
         self._task_ctx = ""    # one-line task description only
 
-    # ── helper ─────────────────────────────────────────────────────────────────
+    # ── helpers ────────────────────────────────────────────────────────────────
     def _gen(self, prompt: str, context: str, temperature: float):
         full = f"{context}\n\n{prompt}" if context else prompt
         return self.call_llm(full, temperature=temperature)
 
+    def _parallel(self, call: Callable[[], str], n: int) -> List[str]:
+        """Run ``n`` independent completions of the same instance concurrently."""
+        if n <= 1:
+            return [call()]
+        with ThreadPoolExecutor(max_workers=n) as executor:
+            return [f.result() for f in [executor.submit(call) for _ in range(n)]]
+
+    def _attempts_per_round(self) -> int:
+        """m for this regime.
+
+        With a decisive checker a single probe already settles the verdict: every
+        c_q in :mod:`baseline.FoT.checkers` is deterministic and computes its
+        canonical verdict independently of the probe, so re-probing the same
+        candidate could only repeat the same answer at the same cost.
+        """
+        return 1 if self._has_checker else max(1, self.survival)
+
+    def _reset_falsifier(self) -> None:
+        """Rewind Next / NextSlot at the start of a question."""
+        self._rel_cursor = 0
+        self._slot_cursor = 0
+        self._seen = set()
+
     # ── Solve : q → a  (Algorithm 1, pi_solve) ──────────────────────────────────
-    def solve(self, question: str) -> str:
+    def solve(self, question: str, temperature: Optional[float] = None) -> str:
         """Produce a candidate with a CoT-style base reasoner.
 
         The same template serves the initial solve and every follow-up solve
         inside the falsifier. It has no slot for a candidate answer, which is what
-        enforces Remark 1 structurally rather than by convention.
+        enforces the independence of rho_mr structurally rather than by convention.
         """
         r = self._gen(
             "Solve the following problem. Reason step by step and do not skip "
@@ -271,13 +395,12 @@ class FoT(BaseBaseline):
             "When you are finished, write the final answer on its own line, "
             "exactly as:\nANSWER: <your answer>",
             context=self._solve_ctx,
-            temperature=self.solve_temperature)
+            temperature=(self.solve_temperature if temperature is None else temperature))
         return r.content.strip()
 
     # ── Falsify : (q, a) → w | ⊥  (Algorithm 2) ─────────────────────────────────
-    def falsify(self, question: str, candidate: str,
-                round_index: int = 0) -> Optional[Witness]:
-        """Attempt to construct a witness that ``candidate`` is wrong.
+    def falsify(self, question: str, candidate: str) -> Optional[Witness]:
+        """Make ONE attempt to construct a witness that ``candidate`` is wrong.
 
         Dispatches on the fixed per-benchmark ``HasChecker(q)`` predicate. The
         regime does not change across rounds or instances.
@@ -285,7 +408,7 @@ class FoT(BaseBaseline):
         answer = _extract_answer(candidate)
         if self._has_checker:
             return self._falsify_executable(question, answer)
-        return self._falsify_metamorphic(question, answer, round_index)
+        return self._falsify_relational(question, answer)
 
     # ── Executable regime (pi_probe + trusted c_q) ──────────────────────────────
     def _falsify_executable(self, question: str, answer: str) -> Optional[Witness]:
@@ -313,51 +436,106 @@ class FoT(BaseBaseline):
         if result.verdict != "fail":
             return None  # "pass" or "undecided": the candidate survives.
         return Witness(
-            text=result.detail,
+            text=(f"An external checker ran this probe against the answer "
+                  f"{answer!r}: {probe or '(the checker chose its own check)'}\n"
+                  f"It failed: {result.detail}"),
             sound=True,
             regime="executable",
-            orbit_block=(f"Probe run by an external checker: {probe or '(none)'}\n"
-                         f"Result: {result.detail}"),
-            relations_block="the answer must pass this check",
-            violations=["checker"],
-            satisfied=0,
+            family="checker",
+            relation="checker",
+            expected="the check to pass",
+            observed=result.detail,
+            instance=probe,
         )
 
-    # ── Metamorphic regime (catalogue C + independent variant solves) ───────────
-    def _select_relations(self, question: str, candidate: str,
-                          offset: int) -> List[Tuple[Relation, Optional[Variant]]]:
-        """Sample(C, n): draw up to n *applicable* relations, deterministically.
+    # ── Relational regime (library R_q + voted derivations) ─────────────────────
+    def _instantiate(self, relation: Relation, question: str,
+                     answer: str) -> Optional[Variant]:
+        """Realise one programmatic relation as a check instance, or skip it.
 
-        Programmatic transformations are applied here (they cost no model call);
-        a relation that does not apply to this query is skipped, which is not a
-        violation. Rounds start at different offsets so successive rounds attack
-        the candidate from different directions.
+        A relation that does not fit this query returns None, which is *not* a
+        violation — it is simply skipped, so an unregistered benchmark degrades
+        to FoT ≡ Solve rather than to a misapplied relation.
         """
-        selected: List[Tuple[Relation, Optional[Variant]]] = []
-        size = len(self._catalogue)
+        if relation.family == "inv":
+            if relation.invariant is None:
+                return None
+            computed = relation.invariant(question, answer)
+            if computed is None:
+                return None
+            expected, observed, detail = computed
+            return Variant(
+                relation=relation.name,
+                relation_text=relation.relation_text,
+                question="",
+                holds=lambda a, value, _e=expected: value == _e,
+                family="inv",
+                expected=expected,
+                observed=observed,
+                detail=detail,
+                source="programmatic",
+            )
+        if relation.family == "bwd":
+            if relation.apply_slot is None or not enumerate_slots(question):
+                return None
+            # NextSlot(q): each landing on rho_bwd masks the *next* stated
+            # quantity, so successive backward checks are genuinely distinct.
+            variant = relation.apply_slot(question, answer, self._slot_cursor)
+            if variant is not None:
+                self._slot_cursor += 1
+            return variant
+        if relation.apply is not None:
+            return relation.apply(question, answer)
+        return None
+
+    def _next_instance(self, question: str, answer: str) -> Optional[Variant]:
+        """Next(R_q): the next *distinct*, applicable check instance, or None.
+
+        Programmatic transformations are applied here and cost no model call.
+        Instances already used against the current candidate are skipped, so
+        surviving m attempts means surviving m different checks; when the library
+        runs out, the falsifier returns ⊥ and the candidate survives.
+        """
+        size = len(self._library)
         if size == 0:
-            return selected
-        for i in range(size):
-            rel = self._catalogue[(offset + i) % size]
-            if rel.programmatic:
-                variant = rel.apply(question, candidate)  # type: ignore[misc]
-                if variant is None:
+            return None
+        for _ in range(size * _MAX_LIBRARY_PASSES):
+            relation = self._library[self._rel_cursor % size]
+            self._rel_cursor += 1
+            if not relation.programmatic:
+                # pi_mr costs a model call, so dedupe *before* paying for it: one
+                # instantiation per model-applied relation per candidate.
+                if relation.name in self._seen:
                     continue
-                selected.append((rel, variant))
-            else:
-                if rel.applicable is not None and not rel.applicable(question):
+                if relation.applicable is not None and not relation.applicable(question):
+                    self._seen.add(relation.name)
                     continue
-                selected.append((rel, None))
-            if len(selected) >= self.probes:
-                break
-        return selected
+                self._seen.add(relation.name)
+                variant = self.build_variant(relation, question)
+                if variant is not None:
+                    return variant
+                continue
+            variant = self._instantiate(relation, question, answer)
+            if variant is None:
+                continue
+            key = (variant.relation, variant.slot)
+            if key in self._seen:
+                continue
+            self._seen.add(key)
+            return variant
+        return None
 
     def build_variant(self, relation: Relation, question: str) -> Optional[Variant]:
         """pi_mr: have the model apply a transformation it cannot get done in code.
 
         Used only for paraphrase-style relations. The prompt forbids solving
         either problem and never mentions the candidate, and the parsed
-        ``RELATION:`` line is discarded — rho comes from the audited catalogue.
+        ``RELATION:`` line is discarded — phi comes from the audited library.
+
+        The result is then *mechanically validated*: a model-instantiated
+        transform must carry over every numeric literal of the original, so a
+        paraphrase that quietly drops or invents a quantity is rejected rather
+        than checked against an invalid relation.
         """
         r = self._gen(
             "Rewrite the problem below into an EQUIVALENT variant by applying "
@@ -378,143 +556,150 @@ class FoT(BaseBaseline):
         variant_text = _parse_variant(r.content)
         if not variant_text:
             return None
+        if (relation.preserve_numbers
+                and numeric_literals(variant_text) != numeric_literals(question)):
+            return None
         return equality_variant(relation, variant_text, source="model")
 
-    def _probe(self, relation: Relation, variant: Optional[Variant],
-               question: str) -> Optional[Tuple[Variant, str]]:
-        """Build one variant if needed, then solve it independently."""
-        if variant is None:
-            variant = self.build_variant(relation, question)
-            if variant is None:
-                return None
-        answer = _extract_answer(self.solve(variant.question))
-        return (variant, answer)
+    def _voted_value(self, variant: Variant, answer: str) -> Tuple[Optional[str], int]:
+        """The voted model value for a check instance, plus the vote size s.
 
-    def _falsify_metamorphic(self, question: str, answer: str,
-                             round_index: int) -> Optional[Witness]:
-        """Refute the candidate with its own answers to transformed queries.
-
-        Draws n relations, solves each variant independently, and returns a
-        witness only if at least τ relations are violated *and* the candidate is
-        outside the majority of the orbit (Remark 3).
+        The single model-produced value in a relational check is the only place a
+        hallucination could enter, so it is the majority over ``s`` independent
+        completions of the *same* instance; ties and an UNDETERMINED majority
+        abstain (None).
         """
-        selected = self._select_relations(question, answer, round_index * self.probes)
-        if not selected:
-            return None  # no applicable relation: FoT degenerates to Solve
+        size = max(1, self.votes)
+        if variant.family == "bwd":
+            def call() -> str:
+                return _parse_derived(self._mask_derivation(variant, answer))
+        else:
+            def call() -> str:
+                return _extract_answer(
+                    self.solve(variant.question, temperature=self.vote_temperature))
+        return _majority(self._parallel(call, size)), size
 
-        with ThreadPoolExecutor(max_workers=len(selected)) as executor:
-            futures = [executor.submit(self._probe, rel, var, question)
-                       for rel, var in selected]
-            probed = [f.result() for f in futures]
+    def _mask_derivation(self, variant: Variant, answer: str) -> str:
+        """pi_mask: re-derive the hidden quantity, taking the candidate as given.
 
-        orbit: List[str] = [answer]                       # O ← {a}, in q's frame
-        violations: List[Tuple[Variant, str]] = []        # V
-        lines: List[str] = []
-        checked = 0
-        for item in probed:
-            if item is None:
-                continue
-            variant, a_prime = item
-            checked += 1
-            if variant.pullback is not None:
-                pulled = variant.pullback(a_prime)
-                if pulled is not None:
-                    orbit.append(pulled)                  # O ← O ∪ {g^-1(a')}
-            violated = not variant.holds(answer, a_prime)
-            if violated:
-                violations.append((variant, a_prime))
-            lines.append(
-                f"[{variant.relation}] {'DISAGREES' if violated else 'agrees'}\n"
-                f"Formulation:\n{variant.question}\n"
-                f"Answer given to it: {a_prime}")
+        The prompt is a forward derivation of one unknown with every other fact
+        fixed — the setting in which LLM computation is most constrained — and it
+        never asks for a judgement, so the eventual verdict is a pure Compare.
+        """
+        r = self._gen(
+            "You are given a problem in which ONE stated quantity has been hidden "
+            "and replaced by X, together with a candidate final answer to the "
+            "original problem. Your job is NOT to judge the candidate answer. Take "
+            "it as given, and re-derive the hidden quantity X from the candidate "
+            "answer and the remaining information in the problem. Reason step by "
+            "step.\n\n"
+            f"Problem (one quantity hidden as X):\n{variant.question}\n\n"
+            f"Candidate final answer (take as given):\n{answer}\n\n"
+            "If X cannot be uniquely determined from the above, output exactly:\n"
+            f"DERIVED: {UNDETERMINED}\n"
+            "Otherwise, write the re-derived value on its own line, exactly as:\n"
+            "DERIVED: <value of X>",
+            context=self._task_ctx,
+            temperature=self.vote_temperature)
+        return r.content
 
-        if len(violations) < max(1, self.tau):
-            return None                                   # survives this round
-        if self.use_majority and self._in_majority(answer, orbit):
-            return None                                   # the orbit backs the candidate
+    def _falsify_relational(self, question: str, answer: str) -> Optional[Witness]:
+        """One relation instance: the model constructs, the comparator decides."""
+        variant = self._next_instance(question, answer)
+        if variant is None:
+            return None                       # nothing applicable left: survives
 
-        names = [v.relation for v, _ in violations]
-        summary = "; ".join(
-            f"under '{v.relation_text}', the variant answered {a_prime!r} "
-            f"while the candidate answers {answer!r}"
-            for v, a_prime in violations)
+        if variant.family == "inv":            # no model call: both sides computed
+            observed = variant.observed or ""
+            if variant.holds(answer, observed):
+                return None
+            return self._make_witness(variant, answer, observed, votes=0)
+
+        observed, size = self._voted_value(variant, answer)
+        if observed is None:
+            return None                       # tie or UNDETERMINED: abstain
+        if variant.holds(answer, observed):
+            return None                       # phi holds: the candidate survives
+        return self._make_witness(variant, answer, observed, votes=size)
+
+    def _make_witness(self, variant: Variant, answer: str, observed: str,
+                      votes: int) -> Witness:
+        """Render w = ⟨rho, instance, (expected, observed)⟩ for pi_rep."""
+        expected = variant.expected_value(answer) or "(not determined)"
+        if variant.family == "bwd":
+            text = (f"Backward check on the stated quantity {variant.slot!r}: "
+                    f"taking the final answer {answer!r} as given, the hidden "
+                    f"quantity X re-derives to {observed!r} by majority over "
+                    f"{votes} independent derivations, but the problem states "
+                    f"{expected!r}.\n\n"
+                    f"The problem with that quantity hidden as X:\n{variant.question}")
+        elif variant.family == "inv":
+            text = (f"Invariant check [{variant.relation}]: {variant.detail}. "
+                    f"The check required {expected!r} but the problem data gives "
+                    f"{observed!r}.")
+        else:
+            text = (f"Metamorphic check [{variant.relation}]: {variant.relation_text}. "
+                    f"The transformed problem below was solved independently "
+                    f"{votes} time(s) without your answer being shown; the majority "
+                    f"answer is {observed!r}, while your answer {answer!r} requires "
+                    f"it to be {expected!r}.\n\n"
+                    f"The transformed problem:\n{variant.question}")
         return Witness(
-            text=f"metamorphic disagreement ({', '.join(names)}): {summary}",
+            text=text,
             sound=False,
-            regime="metamorphic",
-            orbit_block="\n\n".join(lines),
-            relations_block="\n".join(
-                f"- [{v.relation}] {v.relation_text}" for v, _ in violations),
-            violations=names,
-            satisfied=checked - len(violations),
+            regime="relational",
+            family=variant.family,
+            relation=variant.relation,
+            expected=expected,
+            observed=observed,
+            instance=variant.question,
+            votes=votes,
         )
-
-    @staticmethod
-    def _in_majority(answer: str, orbit: List[str]) -> bool:
-        """Majority(O): is the candidate among the most frequent answers in the orbit?"""
-        counts: Dict[str, int] = {}
-        for a in orbit:
-            counts[normalize_answer(a)] = counts.get(normalize_answer(a), 0) + 1
-        top = max(counts.values())
-        return counts.get(normalize_answer(answer), 0) >= top
 
     # ── Repair : (q, a, w, H) → a'  (Algorithm 3, pi_rep) ───────────────────────
     def repair(self, question: str, candidate: str, witness: Witness,
                history: List[str]) -> str:
         """Produce a revised candidate that specifically resolves ``witness``.
 
-        In the metamorphic regime the witness carries the whole orbit, so repair
-        is constraint satisfaction over several equivalent formulations rather
-        than "your answer is wrong, try again": the prompt presents a
-        contradiction, never a judgement, which keeps the model working on the
-        problem instead of on its own credibility. The history H is carried
-        forward so repairs do not reintroduce previously resolved failures.
+        Because the witness localises the error — down to a named quantity and a
+        pair of conflicting values — repair is targeted rather than a blind
+        re-attempt: the model is told not only *that* the answer failed but
+        exactly *on what*. The history H is carried forward so repairs do not
+        reintroduce previously resolved failures, and for pair-implicating
+        metamorphic witnesses the prompt explicitly licenses the model to defend
+        its answer, so a rare wrong follow-up cannot force a wrong repair.
         """
         hist = "(none)"
         if self.carry_witness_history and history:
             hist = "\n".join(f"- {w}" for w in history)
 
-        if witness.regime == "executable":
-            lead = ("An external checker ran the probe below against the previous "
-                    "answer and it failed. Produce a corrected answer that "
-                    "specifically resolves that failure. Re-derive the problem "
-                    "independently and do not assume the previous answer is "
-                    "correct. Make sure your new answer does not reintroduce any "
-                    "of the past failures listed.")
-            orbit_label = "Probe and checker result:"
-            relations_label = "What must hold:"
-        else:
-            lead = ("Below are several formulations of the same problem, together "
-                    "with the answer that was previously given to each one. These "
-                    "answers are mutually inconsistent, so at least one of them is "
-                    "wrong.\n\nProduce a single answer that is consistent with "
-                    "EVERY formulation. Re-derive each formulation independently "
-                    "and do not assume that any previous answer is correct. Make "
-                    "sure your new answer does not reintroduce any of the past "
-                    "failures listed.")
-            orbit_label = "Equivalent formulations and the answers they received:"
-            relations_label = "Relations that must hold between those answers:"
-
         r = self._gen(
-            f"{lead}\n\n"
-            f"Original problem:\n{question}\n\n"
-            f"Previous answer to the original problem:\n{_extract_answer(candidate)}\n\n"
-            f"{orbit_label}\n{witness.orbit_block}\n\n"
-            f"{relations_label}\n{witness.relations_block}\n\n"
+            "A previous answer to the problem below failed a mechanical check. The "
+            "witness states the exact contradiction that was found: which value was "
+            "checked, what the check expected, and what was observed instead. Use it "
+            "to produce a corrected answer that specifically resolves this "
+            "contradiction. If the witness compares your answer against a transformed "
+            "variant of the problem and you conclude, after re-deriving both sides, "
+            "that the variant's answer -- not yours -- is at fault, you may restate "
+            "your previous answer. Make sure your answer does not reintroduce any of "
+            "the past failures listed. Reason step by step.\n\n"
+            f"Problem:\n{question}\n\n"
+            f"Previous answer:\n{_extract_answer(candidate)}\n\n"
+            f"Witness (the contradiction found by the check):\n{witness.text}\n\n"
             f"Past failures to avoid:\n{hist}\n\n"
-            "Reason step by step. When finished, write the final answer on its own "
-            "line, exactly as:\nANSWER: <your answer>",
+            "When finished, write the final answer on its own line, exactly as:\n"
+            "ANSWER: <your answer>",
             context=self._solve_ctx,
             temperature=self.repair_temperature)
         return r.content.strip()
 
-    # ── pi_mr-gen: model-proposed catalogue (ablation only) ─────────────────────
+    # ── pi_mr-gen: model-proposed library (ablation only) ───────────────────────
     def _generate_catalogue(self, question: str) -> None:
-        """Build C with the model instead of by hand (catalogue ablation).
+        """Build R_q with the model instead of by hand (library ablation).
 
-        Generated once per run from one example problem, since C is a property of
-        the task rather than of the query. Only proposals whose stated relation is
-        answer-preserving are kept — rho must be evaluable by the driver.
+        Generated once per run from one example problem, since R_q is a property
+        of the task rather than of the query. Only proposals whose stated relation
+        is answer-preserving are kept — phi must be evaluable by the driver.
         """
         r = self._gen(
             "Propose transformations that change the surface form of a problem of "
@@ -535,7 +720,7 @@ class FoT(BaseBaseline):
             temperature=self.falsify_temperature)
         generated = parse_generated_catalogue(r.content)
         if generated:
-            self._catalogue = generated
+            self._library = generated
         self._catalogue_generated = True
 
     # ── Driver loop (Algorithm 4) ───────────────────────────────────────────────
@@ -557,49 +742,59 @@ class FoT(BaseBaseline):
                 and not self._catalogue_generated):
             self._generate_catalogue(question)
 
+        self._reset_falsifier()
         candidate = self.solve(question)                  # a ← Solve(q)
-        trace: List[str] = [f"[Solve] {_extract_answer(candidate)!r}"]
-        witness_history: List[str] = []                   # H ← ∅
-        # S: (candidate, corroboration score). "Rounds survived" is graded by how
-        # many probes of the round the candidate withstood, so a candidate refuted
-        # on 1 of 3 relations outranks one refuted on 3 of 3; ties resolve to the
-        # earliest entry, which makes the initial Solve answer the floor. A
-        # candidate refuted by a SOUND witness is dropped from S outright: it is
-        # provably wrong and must never be returned.
-        archive: List[Tuple[str, int]] = [(candidate, 0)]
+        initial_answer = _extract_answer(candidate)
+        trace: List[str] = [f"[Solve] {initial_answer!r}"]
+        history: List[str] = []                           # H ← ∅
+        records: List[Dict[str, Any]] = []
+        attempts = self._attempts_per_round()             # m
+        # Optional deviation from Alg. 4 (``archive=True``): remember how many
+        # checks each candidate withstood, so budget exhaustion can return the
+        # best-corroborated one instead of the last step of the walk. A candidate
+        # refuted by a SOUND witness is dropped outright: it is provably wrong.
+        seen_candidates: List[Tuple[str, int]] = [(candidate, 0)]
 
         accepted = False
-        regimes: List[str] = []
-        iterations = 0
-        for k in range(self.budget):
-            witness = self.falsify(question, candidate, round_index=k)
-            if witness is None:
-                # Survived falsification → accept the fixpoint.
+        for k in range(self.budget):                      # for k ← 1 to K
+            witness: Optional[Witness] = None
+            survived = 0
+            for _ in range(attempts):                     # for j ← 1 to m
+                witness = self.falsify(question, candidate)
+                if witness is not None:
+                    break
+                survived += 1
+            if witness is None:                           # survived m checks
                 accepted = True
-                trace.append(f"[Falsify k={k + 1}] survived → accept")
+                trace.append(f"[Falsify k={k + 1}] survived {survived} distinct "
+                             f"check(s) → accept fixpoint")
                 break
-            iterations += 1
-            regimes.append(witness.regime)
+
+            witness.survived = survived
+            records.append(witness.record())
             trace.append(
-                f"[Falsify k={k + 1}] witness ({witness.regime}, "
-                f"sound={witness.sound}, violations={witness.violations}): "
-                f"{witness.text}")
-            if witness.sound:
-                archive.pop()                             # provably wrong
-            else:
-                archive[-1] = (archive[-1][0], witness.satisfied)
-            witness_history.append(witness.text)          # H ← H ∪ {w}
-            candidate = self.repair(question, candidate, witness, witness_history[:-1])
-            archive.append((candidate, 0))                # S ← S ∪ {(a, 0)}
+                f"[Falsify k={k + 1}] witness ({witness.regime}/{witness.family}"
+                f":{witness.relation}, sound={witness.sound}, survived={survived}): "
+                f"{witness.text.splitlines()[0]}")
+            if self.archive:
+                if witness.sound:
+                    seen_candidates.pop()                 # provably wrong
+                else:
+                    seen_candidates[-1] = (seen_candidates[-1][0], survived)
+
+            history.append(witness.text)                  # H ← H ∪ {w}
+            candidate = self.repair(question, candidate, witness, history[:-1])
+            # A repaired candidate is a new candidate: re-open every check for it.
+            self._seen.clear()
+            if self.archive:
+                seen_candidates.append((candidate, 0))
             trace.append(f"[Repair k={k + 1}] → {_extract_answer(candidate)!r}")
 
         returned = "fixpoint" if accepted else "last"
-        if not accepted and archive:
-            # Budget exhausted: return the best-surviving candidate, not the last
-            # step of an unguided walk.
-            best = max(range(len(archive)), key=lambda i: archive[i][1])
-            if archive[best][0] != candidate:
-                candidate = archive[best][0]
+        if not accepted and self.archive and seen_candidates:
+            best = max(range(len(seen_candidates)), key=lambda i: seen_candidates[i][1])
+            if seen_candidates[best][0] != candidate:
+                candidate = seen_candidates[best][0]
                 returned = "archive"
                 trace.append(f"[Archive] best-surviving → {_extract_answer(candidate)!r}")
 
@@ -611,20 +806,26 @@ class FoT(BaseBaseline):
             metadata={
                 "task": self.task,
                 "subtask": self.subtask,
-                "regime": "executable" if self._has_checker else "metamorphic",
+                "regime": "executable" if self._has_checker else "relational",
                 "has_checker": self._has_checker,
-                "catalogue": [r.name for r in self._catalogue],
+                "library": [r.name for r in self._library],
                 "accepted_fixpoint": accepted,
                 "returned": returned,
                 "budget": self.budget,
-                "probes": self.probes,
-                "tau": self.tau,
-                "use_majority": self.use_majority,
-                "repairs_used": iterations,
+                "survival": attempts,
+                "votes": self.votes,
+                "repairs_used": len(records),
                 "budget_exhausted": not accepted,
                 "execute_code": self.execute_code,
-                "falsification_regimes": regimes,
-                "witness_history": witness_history,
+                # Mechanism-level evaluation (§3.6): the initial/final pair gives
+                # the flip matrix, and the witness records give witness precision
+                # per regime and per relation family, once ground truth is joined.
+                "initial_answer": initial_answer,
+                "answer_changed": normalize_answer(initial_answer)
+                                  != normalize_answer(final_answer),
+                "witnesses": records,
+                "falsification_regimes": [r["regime"] for r in records],
+                "witness_history": history,
             },
         )
 
@@ -632,6 +833,6 @@ class FoT(BaseBaseline):
         return (f"FoT(baseline_name='{self.baseline_name}', "
                 f"llm={self.llm.__class__.__name__}, task={self.task!r}, "
                 f"subtask={self.subtask!r}, budget={self.budget}, "
-                f"probes={self.probes}, tau={self.tau}, "
+                f"survival={self.survival}, votes={self.votes}, "
                 f"has_checker={self._has_checker}, "
-                f"catalogue={[r.name for r in self._catalogue]})")
+                f"library={[r.name for r in self._library]})")

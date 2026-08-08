@@ -88,10 +88,10 @@ BASELINE_REGISTRY: dict[str, tuple] = {
     )),
     "fot": (FoT, lambda a: dict(
         budget=a.fot_budget,
-        probes=a.fot_probes,
-        tau=a.fot_tau,
-        use_majority=a.fot_majority,
+        survival=a.fot_survival,
+        votes=a.fot_votes,
         solve_temperature=a.fot_solve_temp,
+        vote_temperature=a.fot_vote_temp,
         falsify_temperature=a.fot_falsify_temp,
         repair_temperature=a.fot_repair_temp,
         execute_code=a.fot_execute_code,
@@ -99,6 +99,7 @@ BASELINE_REGISTRY: dict[str, tuple] = {
         carry_witness_history=a.fot_witness_history,
         relations=a.fot_relations,
         generate_relations=a.fot_generate_relations,
+        archive=a.fot_archive,
     )),
 }
 
@@ -141,10 +142,10 @@ class Evaluator:
             # Input-output demonstrations D for the reverse-reasoning warm-up.
             kwargs["demos"] = dataset.get_demonstrations(n_shot=self.args.rot_n_shot)
         if self.args.baseline.lower() == "fot":
-            # HasChecker(q) and the relation catalogue C are both fixed per
+            # HasChecker(q) and the relation library R_q are both fixed per
             # benchmark: pass the benchmark (and sub-benchmark) name so FoT selects
-            # its trusted checker c_q (executable regime) or the catalogue of
-            # metamorphic relations to attack the candidate with.
+            # its trusted checker c_q (executable regime) or the library of
+            # relation schemas to attack the candidate with (relational regime).
             benchmark = self.args.benchmark.lower()
             kwargs["task"] = benchmark
             if benchmark == "bigbenchhard":
@@ -509,38 +510,43 @@ def fot_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("FoT")
     g.add_argument("--fot_budget", type=int, default=3,
                    help="Budget K: maximum number of Falsify→Repair iterations before "
-                        "the best-surviving archived candidate is returned")
-    g.add_argument("--fot_probes", type=int, default=3,
-                   help="Probes n: metamorphic relations drawn from the catalogue per "
-                        "falsification round — each one costs an independent Solve of a "
-                        "transformed query (the executable regime always issues 1 probe)")
-    g.add_argument("--fot_tau", type=int, default=2,
-                   help="Refutation threshold τ: how many relations must be violated "
-                        "before a repair fires (Remark 3 — corroboration). Only used in "
-                        "the metamorphic regime; one sound checker failure is decisive.")
-    g.add_argument("--no_fot_majority", action="store_false", dest="fot_majority",
-                   help="Drop the orbit-majority acceptance rule, so a candidate is "
-                        "repaired even when the bulk of the orbit agrees with it. "
-                        "Together with --fot_tau 1 this recovers the pilot's behaviour "
-                        "(the paper's ablation).")
+                        "the last candidate is returned")
+    g.add_argument("--fot_survival", type=int, default=3,
+                   help="Survival threshold m: distinct checks a candidate must survive "
+                        "before it is accepted as a fixpoint. Each attempt draws a "
+                        "different relation (and a different masked slot) from the "
+                        "library; the executable regime always issues exactly 1, since "
+                        "one probe settles a deterministic checker's verdict.")
+    g.add_argument("--fot_votes", type=int, default=5,
+                   help="Vote size s: independent completions a relational check takes "
+                        "the majority over, abstaining on a tie or an UNDETERMINED "
+                        "majority. Relational regime only; total cost is K·(1+m·s).")
     g.add_argument("--fot_relations", nargs="+", default=None,
-                   help="Restrict the metamorphic catalogue C to these relation names "
-                        "(e.g. --fot_relations scale_quantities_x2 mask_quantity); "
-                        "default uses the whole catalogue for the benchmark")
+                   help="Restrict the relation library R_q to these relation names "
+                        "(e.g. --fot_relations mask_quantity permute_premises); "
+                        "default uses the whole library for the benchmark")
     g.add_argument("--fot_generate_relations", action="store_true",
-                   help="Ablation: build the catalogue C with the model (pi_mr-gen) from "
+                   help="Ablation: build the library R_q with the model (pi_mr-gen) from "
                         "the first question of the run instead of the hand-written, "
-                        "human-audited catalogue")
+                        "human-audited library")
+    g.add_argument("--fot_archive", action="store_true",
+                   help="Deviation from Algorithm 4: on budget exhaustion return the "
+                        "best-corroborated candidate seen (dropping any that a sound "
+                        "witness proved wrong) instead of the last one")
     g.add_argument("--fot_solve_temp", type=float, default=0.0,
-                   help="Sampling temperature for Solve (the initial candidate and every "
-                        "independent solve of a transformed query)")
+                   help="Sampling temperature for the initial Solve")
+    g.add_argument("--fot_vote_temp", type=float, default=0.7,
+                   help="Sampling temperature for the s completions of a relational "
+                        "check (pi_mask and the follow-up pi_solve). Must be non-zero "
+                        "for the vote to carry information: at 0 a deterministic backend "
+                        "returns s copies of one completion.")
     g.add_argument("--fot_falsify_temp", type=float, default=0.7,
-                   help="Sampling temperature for the falsifier's own calls (pi_probe, "
-                        "pi_mr)")
+                   help="Sampling temperature for the falsifier's own construction calls "
+                        "(pi_probe, pi_mr)")
     g.add_argument("--fot_repair_temp", type=float, default=0.0,
                    help="Sampling temperature for witness-guided Repair")
     g.add_argument("--no_fot_execute_code", action="store_false", dest="fot_execute_code",
-                   help="Disable the executable falsification regime, forcing metamorphic "
+                   help="Disable the executable falsification regime, forcing relational "
                         "falsification on every benchmark. By default FoT uses a "
                         "trusted, benchmark-specific checker c_q (arithmetic for Game "
                         "of 24 and BBH multi-step arithmetic, program execution for "

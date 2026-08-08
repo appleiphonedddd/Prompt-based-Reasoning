@@ -23,7 +23,7 @@ profile):
 Each checker is deterministic and derives its verdict ONLY from the problem
 statement (which carries the reference function / puzzle numbers / sat predicate)
 and the candidate answer — the model is not involved in the decision. Tasks not
-registered here have ``HasChecker(q) = False`` and fall to the semantic regime.
+registered here have ``HasChecker(q) = False`` and fall to the relational regime.
 
 The mapping from benchmark to checker realises the paper's ``HasChecker(q)``
 predicate: it is FIXED PER BENCHMARK (keyed by the benchmark name), not decided
@@ -315,7 +315,7 @@ def has_checker(task: Optional[str], subtask: Optional[str] = None) -> bool:
 
 
 def get_checker(task: Optional[str], subtask: Optional[str] = None) -> Optional[Checker]:
-    """Return the trusted checker c_q for ``task``, or None for the metamorphic regime."""
+    """Return the trusted checker c_q for ``task``, or None for the relational regime."""
     if not task:
         return None
     base = task.lower()
