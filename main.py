@@ -88,13 +88,17 @@ BASELINE_REGISTRY: dict[str, tuple] = {
     )),
     "fot": (FoT, lambda a: dict(
         budget=a.fot_budget,
-        survival_threshold=a.fot_survival,
+        probes=a.fot_probes,
+        tau=a.fot_tau,
+        use_majority=a.fot_majority,
         solve_temperature=a.fot_solve_temp,
         falsify_temperature=a.fot_falsify_temp,
         repair_temperature=a.fot_repair_temp,
         execute_code=a.fot_execute_code,
         code_timeout=a.fot_code_timeout,
         carry_witness_history=a.fot_witness_history,
+        relations=a.fot_relations,
+        generate_relations=a.fot_generate_relations,
     )),
 }
 
@@ -137,10 +141,14 @@ class Evaluator:
             # Input-output demonstrations D for the reverse-reasoning warm-up.
             kwargs["demos"] = dataset.get_demonstrations(n_shot=self.args.rot_n_shot)
         if self.args.baseline.lower() == "fot":
-            # HasChecker(q) is fixed per benchmark: pass the benchmark name so FoT
-            # selects its trusted checker c_q (executable regime) or falls to the
-            # semantic regime when none is registered.
-            kwargs["task"] = self.args.benchmark.lower()
+            # HasChecker(q) and the relation catalogue C are both fixed per
+            # benchmark: pass the benchmark (and sub-benchmark) name so FoT selects
+            # its trusted checker c_q (executable regime) or the catalogue of
+            # metamorphic relations to attack the candidate with.
+            benchmark = self.args.benchmark.lower()
+            kwargs["task"] = benchmark
+            if benchmark == "bigbenchhard":
+                kwargs["subtask"] = str(self.args.bigbenchhard_task).lower()
         return cls(llm=client, **kwargs)
 
     def build_dataset(self):
@@ -500,27 +508,45 @@ def got_args(parser: argparse.ArgumentParser) -> None:
 def fot_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("FoT")
     g.add_argument("--fot_budget", type=int, default=3,
-                   help="Budget K: maximum number of Falsify→Repair iterations "
-                        "before the last candidate is returned (paper Algorithm 1)")
-    g.add_argument("--fot_survival", type=int, default=2,
-                   help="Survival threshold m: independent falsification attempts a "
-                        "candidate must survive before it is accepted as a fixpoint "
-                        "(mitigates false refutations in the semantic regime)")
+                   help="Budget K: maximum number of Falsify→Repair iterations before "
+                        "the best-surviving archived candidate is returned")
+    g.add_argument("--fot_probes", type=int, default=3,
+                   help="Probes n: metamorphic relations drawn from the catalogue per "
+                        "falsification round — each one costs an independent Solve of a "
+                        "transformed query (the executable regime always issues 1 probe)")
+    g.add_argument("--fot_tau", type=int, default=2,
+                   help="Refutation threshold τ: how many relations must be violated "
+                        "before a repair fires (Remark 3 — corroboration). Only used in "
+                        "the metamorphic regime; one sound checker failure is decisive.")
+    g.add_argument("--no_fot_majority", action="store_false", dest="fot_majority",
+                   help="Drop the orbit-majority acceptance rule, so a candidate is "
+                        "repaired even when the bulk of the orbit agrees with it. "
+                        "Together with --fot_tau 1 this recovers the pilot's behaviour "
+                        "(the paper's ablation).")
+    g.add_argument("--fot_relations", nargs="+", default=None,
+                   help="Restrict the metamorphic catalogue C to these relation names "
+                        "(e.g. --fot_relations scale_quantities_x2 mask_quantity); "
+                        "default uses the whole catalogue for the benchmark")
+    g.add_argument("--fot_generate_relations", action="store_true",
+                   help="Ablation: build the catalogue C with the model (pi_mr-gen) from "
+                        "the first question of the run instead of the hand-written, "
+                        "human-audited catalogue")
     g.add_argument("--fot_solve_temp", type=float, default=0.0,
-                   help="Sampling temperature for the initial Solve (CoT candidate)")
+                   help="Sampling temperature for Solve (the initial candidate and every "
+                        "independent solve of a transformed query)")
     g.add_argument("--fot_falsify_temp", type=float, default=0.7,
-                   help="Sampling temperature for falsification — non-zero so the m "
-                        "attempts are genuinely independent (different witnesses)")
+                   help="Sampling temperature for the falsifier's own calls (pi_probe, "
+                        "pi_mr)")
     g.add_argument("--fot_repair_temp", type=float, default=0.0,
                    help="Sampling temperature for witness-guided Repair")
     g.add_argument("--no_fot_execute_code", action="store_false", dest="fot_execute_code",
-                   help="Disable the executable falsification regime, forcing semantic "
+                   help="Disable the executable falsification regime, forcing metamorphic "
                         "falsification on every benchmark. By default FoT uses a "
                         "trusted, benchmark-specific checker c_q (arithmetic for Game "
-                        "of 24, program execution for CRUXEval, sat() for Python "
-                        "Puzzles) that yields SOUND witnesses; the model only proposes "
-                        "the probe. The checker runs the benchmark's own reference code "
-                        "in a timeout-bounded subprocess.")
+                        "of 24 and BBH multi-step arithmetic, program execution for "
+                        "CRUXEval, sat() for Python Puzzles) that yields SOUND witnesses; "
+                        "the model only proposes the probe. The checker runs the "
+                        "benchmark's own reference code in a timeout-bounded subprocess.")
     g.add_argument("--fot_code_timeout", type=float, default=10.0,
                    help="Per-execution timeout in seconds for the trusted checker c_q")
     g.add_argument("--no_fot_witness_history", action="store_false", dest="fot_witness_history",

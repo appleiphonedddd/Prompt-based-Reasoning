@@ -16,6 +16,9 @@ profile):
   * ``cruxeval``           — program execution: run the reference function on the
                              given input and compare with the predicted literal.
   * ``programmingpuzzles`` — predicate execution: does ``sat(answer)`` return True?
+  * ``bigbenchhard:multistep_arithmetic_two``
+                           — arithmetic evaluation: recompute the expression the
+                             question states and compare with the answer.
 
 Each checker is deterministic and derives its verdict ONLY from the problem
 statement (which carries the reference function / puzzle numbers / sat predicate)
@@ -263,23 +266,63 @@ def programmingpuzzles_checker(
     return CheckResult("undecided", f"sat() produced no decisive verdict ({res.output!r})")
 
 
+# ── BigBenchHard: multi-step arithmetic ─────────────────────────────────────────
+
+def multistep_arithmetic_checker(
+    question: str, candidate: str, probe: str = "", *, timeout: float = 10.0
+) -> CheckResult:
+    """c_q for BBH ``multistep_arithmetic_two``: recompute the stated expression.
+
+    Sound: the expression is taken verbatim from the question and evaluated with
+    the AST arithmetic evaluator, so the verdict never depends on the model.
+    """
+    expr = question.strip().rstrip("=").strip()
+    try:
+        value = _safe_arith_eval(expr)
+    except (ValueError, SyntaxError, ZeroDivisionError, TypeError):
+        return CheckResult("undecided", "the question is not a plain arithmetic expression")
+
+    m = re.search(r"-?\d+(?:\.\d+)?", candidate.replace(",", ""))
+    if not m:
+        return CheckResult("undecided", "no numeric value found in the candidate answer")
+    given = float(m.group(0))
+    if abs(given - value) < 1e-6:
+        return CheckResult("pass", f"{expr} = {value:g}")
+    return CheckResult(
+        "fail",
+        f"evaluating the expression gives {expr} = {value:g}, not {given:g}",
+    )
+
+
 # ── Registry: realises HasChecker(q), fixed per benchmark ────────────────────────
 
+# Keys are ``benchmark`` or ``benchmark:subtask``; lookup is most-specific-first,
+# so a BigBenchHard subtask can carry a checker while its siblings do not.
 CHECKERS: Dict[str, Checker] = {
     "gameof24": gameof24_checker,
     "cruxeval": cruxeval_checker,
     "programmingpuzzles": programmingpuzzles_checker,
+    "bigbenchhard:multistep_arithmetic_two": multistep_arithmetic_checker,
 }
 
 
-def has_checker(task: Optional[str]) -> bool:
+def has_checker(task: Optional[str], subtask: Optional[str] = None) -> bool:
     """HasChecker(q): True iff this benchmark admits a cheap, decisive checker.
 
     Fixed per benchmark (keyed by name), not decided at run time by the model.
     """
-    return bool(task) and task.lower() in CHECKERS
+    return get_checker(task, subtask) is not None
 
 
-def get_checker(task: Optional[str]) -> Optional[Checker]:
-    """Return the trusted checker c_q for ``task``, or None for the semantic regime."""
-    return CHECKERS.get(task.lower()) if task else None
+def get_checker(task: Optional[str], subtask: Optional[str] = None) -> Optional[Checker]:
+    """Return the trusted checker c_q for ``task``, or None for the metamorphic regime."""
+    if not task:
+        return None
+    base = task.lower()
+    if subtask:
+        specific = CHECKERS.get(f"{base}:{subtask.lower()}")
+        if specific is not None:
+            return specific
+        # A subtask of a benchmark whose checker is registered wholesale still
+        # uses it; a subtask of an unregistered benchmark has none.
+    return CHECKERS.get(base)
