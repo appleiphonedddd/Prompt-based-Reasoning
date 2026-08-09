@@ -8,20 +8,18 @@ falsification (a fixpoint) or a budget is exhausted.
 
 The witness is a constructive artifact, never a verdict. Where a cheap decisive
 checker c_q exists, the model only proposes a probe and the checker decides
-(executable regime). Where it does not, the candidate is attacked with a fixed,
-human-audited library of relation schemas — backward substitution, metamorphic
-transformations and mechanical invariants — whose single model-produced value is
-a majority over independent completions, and the witness is the mechanically
-exhibited contradiction (relational regime). In both regimes the model only
-constructs artifacts; a deterministic comparator issues every verdict.
+(executable regime). Where it does not, the query is transformed by a fixed,
+human-audited catalogue of semantics-preserving relations, each variant is solved
+independently, and the witness is a concrete disagreement inside the resulting
+orbit of answers (metamorphic regime). In both regimes the model only constructs
+artifacts; a deterministic comparator issues every verdict.
 
 Reference:
-- "Falsification-of-Thought: Reasoning by Self-Refutation with Relational
-  Falsification".
+- "Falsification-of-Thought: Reasoning by Metamorphic Self-Refutation".
 """
 
-from .fot import FoT, Witness
+from .fot import Damage, FoT, Witness
 from .relations import Relation, Slot, Variant, enumerate_slots, get_catalogue
 
-__all__ = ["FoT", "Witness", "Relation", "Slot", "Variant", "enumerate_slots",
-           "get_catalogue"]
+__all__ = ["FoT", "Witness", "Damage", "Relation", "Slot", "Variant",
+           "enumerate_slots", "get_catalogue"]

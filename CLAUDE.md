@@ -80,7 +80,7 @@ Prompt-based-Reasoning/
 │   │   └── got.py            # Graph-of-Thought
 │   └── FoT/
 │       ├── fot.py            # Falsification-of-Thought (Solve→Falsify→Repair)
-│       ├── relations.py      # Relation library R_q: bwd / mr / inv (audit this file)
+│       ├── relations.py      # Relation catalogue C: (T, rho) per task (audit this file)
 │       └── checkers.py       # Trusted per-benchmark checkers c_q
 │
 ├── eval/                    # Per-baseline evaluation sweep scripts (bash)
@@ -156,7 +156,7 @@ Prompt-based-Reasoning/
 | `tot` | `ToT` | Tree-of-Thought: BFS or DFS over thought tree |
 | `bot` | `BoT` | Buffer-of-Thought: meta-buffer with semantic template retrieval |
 | `got` | `GoT` | Graph-of-Thought: branch-score-aggregate refinement loops |
-| `fot` | `FoT` | Falsification-of-Thought: Solve → Falsify (executable checker or relation library) → Repair until a candidate survives |
+| `fot` | `FoT` | Falsification-of-Thought: Solve → Falsify (executable checker or an orbit of metamorphic variants) → Repair until a candidate survives |
 
 ### ZeroShotCoT vs ZeroShotCoTSinglePass
 - **ZeroShotCoT** (`zerocot`): Two LLM calls — (1) elicit reasoning with "Let's think step by step", (2) extract final answer
@@ -168,45 +168,47 @@ Prompt-based-Reasoning/
 - Similarity matching via sentence-transformers embeddings + cosine similarity (δ = `--bot_threshold`, default `0.5`)
 - `--no_update_buffer` disables automatic buffer updates after each solve
 
-### FoT (Falsification-of-Thought) — self-refutation with relational falsification
-Implements the paper's driver loop (Algorithm 4): `a ← Solve(q)`, then up to `K` (`--fot_budget`) rounds. Each round makes up to `m` (`--fot_survival`) falsification attempts, **breaking on the first witness**; if all `m` attempts come back ⊥ the candidate is accepted as a fixpoint, otherwise it is repaired on that witness. On budget exhaustion the **last** candidate is returned (Alg. 4 line 12) — `--fot_archive` opts into the older best-corroborated selection instead. Cost is `O(K·(1+m·s))` model calls, all short completions, far below ToT/GoT's recursive expansion.
+### FoT (Falsification-of-Thought) — self-refutation by metamorphic testing
+Implements the paper's driver loop (Algorithm 4): `a ← Solve(q)`, then up to `K` (`--fot_budget`) rounds. Each round calls `Falsify(q, a)` once, which returns a witness `w` **and** a damage score `s(a)`; the candidate is archived with the evidence just gathered, accepted as a fixpoint if `w = ⊥`, otherwise repaired on `w`. On budget exhaustion the driver returns `min_≺ S` — the best *measured* candidate (Def. 2), **not** the last one produced. Cost is `O(K·(1+n))` model calls, all short completions, far below ToT/GoT's recursive expansion.
 
-The design invariant is **the model constructs; a deterministic procedure decides**. No prompt in FoT asks "is this correct?" — the model only ever produces objects (an answer, a probe, a re-derived quantity, a solution to a transformed problem) and every accept/refute verdict is issued by a checker or a comparator. Two regimes, selected by `HasChecker(q)` — **fixed per benchmark, never decided at run time by the model**:
+The guiding principle is **refute by construction, not by verdict**: the model is refuted by its own outputs, never by its own self-assessment. No prompt in FoT asks "is this correct?" — the model only ever produces objects (an answer, a probe, a variant of the problem, an answer to that variant) and every accept/refute verdict is issued by a checker or by the driver's own comparison. Two regimes, selected by `HasChecker(q)` — **fixed per benchmark, never decided at run time by the model**:
 
-- **Executable** — for benchmarks with a registered trusted checker `c_q` in `CHECKERS` (`baseline/FoT/checkers.py`): `gameof24` (arithmetic evaluation), `cruxeval` (program execution), `programmingpuzzles` (`sat()` predicate), `bigbenchhard:multistep_arithmetic_two` (expression recomputation). The model only *proposes a probe*; the external checker returns the verdict, so witnesses are **sound** and a correct candidate is never discarded. Checkers return `fail` / `pass` / `undecided`, and `undecided` counts as survival. Keys are `benchmark` or `benchmark:subtask`, resolved most-specific-first. `m` is forced to **1** here: every `c_q` is deterministic and probe-independent, so a second probe could only repeat the first verdict.
-- **Relational** — every other benchmark. The candidate is attacked with a fixed, human-audited library `R_q` of relation schemas (`baseline/FoT/relations.py`) from the paper's three families (see below). `Next(R_q)` / `NextSlot(q)` cycle through **distinct** relations and masked slots, so surviving `m` attempts means surviving `m` different checks rather than `m` re-rolls of one. The witness is `⟨ρ, instance, (expected, observed)⟩` — a mechanically exhibited contradiction, never an opinion.
+- **Executable** — for benchmarks with a registered trusted checker `c_q` in `CHECKERS` (`baseline/FoT/checkers.py`): `gameof24` (arithmetic evaluation), `cruxeval` (program execution), `programmingpuzzles` (`sat()` predicate), `bigbenchhard:multistep_arithmetic_two` (expression recomputation). The model only *proposes a probe*; the external checker returns the verdict, so witnesses are **sound** and a correct candidate is never discarded. Checkers return `fail` / `pass` / `undecided`, and `undecided` counts as survival. Keys are `benchmark` or `benchmark:subtask`, resolved most-specific-first. `n` and `τ` are forced to **1** here: `c_q` is deterministic and probe-independent, so a second probe could only repeat the first verdict.
+- **Metamorphic** — every other benchmark. `Sample(C, n)` draws `n` (`--fot_probes`, default 3) relations from a fixed, human-audited catalogue `C` (`baseline/FoT/relations.py`), applies each transformation to the query, solves each variant **independently** with `pi_solve`, and collects the violations `V` together with the orbit `O = {a} ∪ {g⁻¹(a'ᵢ)}`. The witness is `⟨V, O⟩` — a concrete disagreement between the model's own outputs, never an opinion.
 
-The relational regime's one model-produced value per check is a **voted derivation**: the majority over `s` (`--fot_votes`, default 5) independent completions of the same instance, abstaining on a tie or an `UNDETERMINED` majority. That is what converts "one bad sample can refute a correct answer" into "a false refutation needs a systematic majority error on a short, tightly constrained derivation". Since the votes must be independent, they are sampled at `--fot_vote_temp` (0.7) — at temperature 0 a deterministic backend would just return `s` copies of one completion.
+Three design decisions carry the weight of the metamorphic branch:
+- **Independence** (Remark 1) — the candidate never appears in the prompt that solves a variant, so the follow-up answer is evidence rather than an echo. This is structural: `pi_solve` has no candidate slot.
+- **Directionality** (Remark 2) — every relation must be *non-decreasing in reliability* (`Relation.direction`), so a disagreement is more likely to indict `a` than `a'`. Distractor insertion is a valid relation but is excluded on this ground.
+- **Corroboration** (Remark 3) — repair fires only when `|V| ≥ τ` (`--fot_tau`, default 2) **and** `a` is outside `Majority(O)`. One carve-out: when the orbit has no pulled-back member (`mask_quantity`'s follow-up answers a different question, so `g⁻¹` is undefined) the majority test carries no information and is skipped, otherwise backward substitution could never refute. `--fot_tau 1 --no_fot_orbit_majority` recovers the pilot's single-violation trigger as an ablation.
 
-This replaces the pilot's *semantic* regime (`pi_nec` + `pi_chk` + the `ReCheckable` guard), where the model asserted that the candidate violated a self-generated necessary condition — the source of the paper's MGSM regression. There is no judgement template anywhere in FoT: `φ` is evaluated by the driver.
+This replaces the pilot's *assertion-based* regime (`pi_nec` + `pi_chk` + the `ReCheckable` guard), where the model asserted that the candidate violated a self-generated necessary condition — the source of the paper's MGSM regression. There is no judgement template anywhere in FoT: `ρ` is evaluated by the driver.
 
-`Evaluator.build_baseline` threads the benchmark in as `task` (plus `subtask` for BigBenchHard), which selects both the checker and the library. `--no_fot_execute_code` forces the relational regime everywhere.
+`Evaluator.build_baseline` threads the benchmark in as `task` (plus `subtask` for BigBenchHard), which selects both the checker and the catalogue. `--no_fot_execute_code` forces the metamorphic regime everywhere.
 
-#### The four prompt templates (§4)
-`pi_solve` (Solve, and every follow-up solve — it has **no candidate slot**, which is what makes `ρ_mr`'s follow-up evidence rather than an echo) → `ANSWER:`; `pi_probe` (executable Falsify) → `PROBE:`; `pi_mask` (backward substitution) → `DERIVED:` with an `UNDETERMINED` escape; `pi_rep` (Repair) → `ANSWER:`. `pi_mr` is an implementation extra for the paraphrase relations whose `T` cannot be run in code. Solve/Repair receive the full task framing so their output stays parseable; the falsifier's own calls receive only the one-line task description, so the answer-format persona never conflicts with "propose a probe" / "re-derive X".
+#### The prompt templates (§3)
+`pi_solve` (Solve, and every follow-up solve — it has **no candidate slot**) → `ANSWER:`; `pi_probe` (executable Falsify) → `PROBE:`; `pi_mr` (metamorphic Falsify, only for transformations that cannot be applied in code) → `VARIANT:` / `RELATION:`; `pi_rep` (Repair) → `ANSWER:`; `pi_mr-gen` (catalogue ablation only) → `MR1:` / `MR2:` …. `pi_rep` presents a *contradiction*, never a judgement: it shows the whole orbit and asks for one answer consistent with every formulation, so repair is constraint satisfaction rather than "try again". In the executable regime its `<orbit>` / `<relations>` slots are filled by the checker's failing probe and its detail `d`, so one repair template covers both branches. Solve/Repair receive the full task framing so their output stays parseable; the falsifier's own calls receive only the one-line task description.
 
-#### The relation library (`baseline/FoT/relations.py`)
-`get_catalogue(task, subtask, names)` resolves `task:subtask` → `task` → default. **Order is load-bearing**: Falsify returns on the first violation, so each library is sorted by soundness rung — invariants, then backward substitution, then answer-preserving transforms, then covariant ones. Every entry must be *valid* and *non-decreasing in reliability*; distractor insertion is deliberately excluded. A relation that does not fit a given query returns `None` and is skipped — never misapplied — so an unregistered benchmark degrades to FoT ≡ Solve.
+#### The relation catalogue (`baseline/FoT/relations.py`)
+`get_catalogue(task, subtask, names)` resolves `task:subtask` → `task` → default. `Sample(C, n)` draws the first `n` **applicable** entries in catalogue order, so the order decides which relations run: reliability-preserving ones first, covariant ones (scaling) last. Every entry must be *valid* and *non-decreasing in reliability*. A relation that does not fit a given query returns `None` and is skipped — never misapplied — so an unregistered benchmark degrades to FoT ≡ Solve.
 
-| Family | `Relation.family` | Realised by | Model calls per check |
-|--------|-------------------|-------------|----------------------|
-| Backward substitution `ρ_bwd` | `bwd` | `apply_slot(q, a, slot)` + `pi_mask` | `s` |
-| Metamorphic transformation `ρ_mr` | `mr` | `apply(q, a)` (or `pi_mr`) + `pi_solve` | `s` (+1 if model-instantiated) |
-| Mechanical invariant `ρ_inv` | `inv` | `invariant(q, a)` → `(expected, observed, detail)` | **0** |
+A `Relation` is `(T, ρ)`; the realised `Variant` carries `holds` (ρ, evaluated by the driver), `expected_for` (g, for the witness) and `pullback` (g⁻¹, for the orbit). Programmatic `T` costs no model call; `apply is None` delegates `T` to `pi_mr` for one call.
 
-| Task | Library (in draw order) |
-|------|-------------------------|
-| `mgsm` | `mask_quantity` (bwd, NextSlot over the numeric literals), `permute_premises`, `translate_to_english` (`pi_mr`, non-English only), `scale_quantities_x2/x3` (φ: `a' = c·a`) |
-| `bigbenchhard:geometric_shapes` | `shape_vertex_count` (**inv** — vertex count and path closure, no model call), `svg_rotate`, `svg_translate_scale`, `svg_reverse`, `options_shift1` |
+| Task | Catalogue (in draw order) |
+|------|---------------------------|
+| `mgsm` | `mask_quantity` (backward substitution — masks the k-th numeric literal on round k; `pullback is None`), `permute_premises`, `translate_to_english` (`pi_mr`, non-English only), `scale_quantities_x2/x3` (ρ: `a' = c·a`) |
+| `bigbenchhard:geometric_shapes` | `svg_rotate`, `svg_translate_scale`, `svg_reverse`, `options_shift1` |
 | `bigbenchhard` (and default) | `options_shift1`, `options_reverse`, `options_shift2` — relabelling options is answer-transforming with a known `g⁻¹` |
 | code benchmarks | `rename_identifiers`, `insert_dead_code` (AST-based) |
 
-Model-instantiated transforms (`apply is None`) are **mechanically validated** after generation: the variant must carry exactly the numeric literals of the original (`preserve_numbers`), or it is discarded rather than checked.
+Model-instantiated transforms (`apply is None`) are **mechanically validated** after generation: the variant must carry exactly the numeric literals of the original (`preserve_numbers`), or it is discarded rather than solved.
 
-Two audit notes are recorded in the module docstring: `scale_quantities` is valid only when the answer is homogeneous of degree one in the scaled quantities — with τ gone its guards are now library ordering (it sits last), the voted derivation, and `pi_rep`'s explicit licence to defend the candidate against a pair-implicating witness — and `mask_quantity` is the one relation whose check instance intentionally contains the candidate.
+Two audit notes are recorded in the module docstring: `scale_quantities` is valid only when the answer is homogeneous of degree one in the scaled quantities — its guard is that both factors are catalogued, so where it fails the two pull-backs disagree, the orbit fragments and the majority rule blocks the repair — and `mask_quantity` is the one relation whose variant intentionally contains the candidate (that is what backward substitution *is*).
+
+#### Caching and cost
+A variant depends on the query, not the candidate (`mask_quantity` excepted), so both the built variants and their answers are cached per question: rounds 2…K reuse the orbit and only pay for `pi_rep`. The orbit's Solve calls run in parallel. Both caches are cleared at the start of every `run()`.
 
 #### Mechanism-level metadata
-Each `BaselineResponse.metadata` carries `initial_answer`, `answer_changed`, `accepted_fixpoint` and a `witnesses` list (`regime`, `family`, `relation`, `expected`, `observed`, `votes`, `survived`, `sound`), which is what the paper's §3.6 metrics need — flip matrix, witness precision per family, false-fixpoint rate — once joined with ground truth. Note that `main.py` does **not** currently write per-question metadata into `results/`, so consuming these means logging the responses yourself.
+Each `BaselineResponse.metadata` carries `initial_answer`, `answer_changed`, `accepted_fixpoint`, `returned` (`fixpoint` | `archive`) and a `witnesses` list (`regime`, `sound`, `violated`, `orbit`, `summary`), which is what the paper's mechanism metrics need — flip matrix, witness precision per relation, false-fixpoint rate — once joined with ground truth. Note that `main.py` does **not** currently write per-question metadata into `results/`, so consuming these means logging the responses yourself.
 
 ### Code Execution in BoT / RoT / FoT
 BoT and RoT **execute the model-generated program by default** and use its stdout as the answer (this is what drives the Game-of-24 / programming results); FoT's executable regime runs the *benchmark's own* reference code. All three go through `run_code`, which uses a timeout-bounded isolated subprocess — but this is still **untrusted model-generated code**. Disable on an untrusted host with `--no_bot_execute_code` / `--no_rot_execute_code` / `--no_fot_execute_code`.
@@ -321,17 +323,16 @@ python main.py --model <model> --baseline <baseline> --benchmark <benchmark> [op
 ### FoT Options
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--fot_budget` | `3` | Budget K: max Falsify→Repair iterations before the last candidate is returned |
-| `--fot_survival` | `3` | Survival threshold m: **distinct** checks a candidate must survive to be accepted as a fixpoint (executable regime always uses 1) |
-| `--fot_votes` | `5` | Vote size s: independent completions a relational check takes the majority over; ties and `UNDETERMINED` majorities abstain |
-| `--fot_relations` | None (all) | Restrict `R_q` to these relation names (e.g. `--fot_relations mask_quantity`) |
-| `--fot_generate_relations` | — | Ablation: build `R_q` with `pi_mr-gen` from the run's first question instead of the audited library |
-| `--fot_archive` | — | Deviation from Alg. 4: on budget exhaustion return the best-corroborated candidate instead of the last |
-| `--fot_solve_temp` | `0.0` | Temperature for the initial Solve |
-| `--fot_vote_temp` | `0.7` | Temperature for the s completions of a relational check (`pi_mask`, follow-up `pi_solve`) — must be > 0 |
+| `--fot_budget` | `3` | Budget K: max Falsify→Repair iterations before the best *measured* candidate is returned |
+| `--fot_probes` | `3` | Number of probes n: relations drawn from `C` per attempt = orbit size (executable regime always uses 1) |
+| `--fot_tau` | `2` | Refutation threshold τ: relations that must be violated before a repair fires; repair also requires `a ∉ Majority(O)` |
+| `--fot_relations` | None (all) | Restrict `C` to these relation names (e.g. `--fot_relations mask_quantity`) |
+| `--fot_generate_relations` | — | Ablation: build `C` with `pi_mr-gen` from the run's first question instead of the audited catalogue |
+| `--no_fot_orbit_majority` | — | Ablation: drop the orbit-majority rule; with `--fot_tau 1` this recovers the pilot's trigger |
+| `--fot_solve_temp` | `0.0` | Temperature for Solve — the initial one and every follow-up solve of a variant |
 | `--fot_falsify_temp` | `0.7` | Temperature for the falsifier's own construction calls (`pi_probe`, `pi_mr`) |
 | `--fot_repair_temp` | `0.0` | Temperature for witness-guided Repair |
-| `--no_fot_execute_code` | — | Force relational falsification on every benchmark |
+| `--no_fot_execute_code` | — | Force metamorphic falsification on every benchmark |
 | `--fot_code_timeout` | `10.0` | Per-execution timeout for the trusted checker c_q |
 | `--no_fot_witness_history` | — | Stop carrying past witnesses into Repair (history is on by default) |
 
@@ -356,9 +357,9 @@ python main.py --model qwen2.5:32b --baseline zerocot --benchmark gameof24
 python main.py --model qwen2.5:32b --baseline fot --benchmark gameof24 \
   --fot_budget 4
 
-# FoT (relational regime — no checker for geometric_shapes, so R_q attacks it)
+# FoT (metamorphic regime — no checker for geometric_shapes, so C attacks it)
 python main.py --model qwen2.5:32b --baseline fot --benchmark bigbenchhard \
-  --bigbenchhard_task geometric_shapes --fot_survival 3 --fot_votes 5
+  --bigbenchhard_task geometric_shapes --fot_probes 3 --fot_tau 2
 
 # BoT with a persistent buffer (default is in-memory)
 python main.py --model qwen2.5:32b --baseline bot --benchmark gameof24 \
@@ -524,7 +525,7 @@ python -m unittest tests.test_metrics tests.test_bot  # several
   - `*_missing_key` expects `ValueError` when no key is set, but these clients now intentionally fall back to the key `"local"` (Ollama needs no key). Only `GPTClient` still raises.
 - `test_bot` (4), `test_benchmark` (1)
 
-`tests/test_fot.py` (57 tests, all passing) covers the FoT relation library, the voted derivation, both falsification regimes, and the driver.
+`tests/test_fot.py` (59 tests, all passing) covers the FoT relation catalogue, the orbit construction and acceptance rule, both falsification regimes, and the driver.
 
 ### Logging
 - Level set to `ERROR` in `main.py` line 26 by default
@@ -535,7 +536,7 @@ python -m unittest tests.test_metrics tests.test_bot  # several
 2. **API Rate Limiting**: Space out requests to cloud APIs
 3. **RoT**: Stage 1+2 warmup is cached across questions; LLM calls within a stage are parallelized
 4. **BoT**: `--no_update_buffer` skips buffer writes to speed up pure evaluation runs
-5. **FoT**: `O(K·(1+m·s))` calls — lower `--fot_budget` / `--fot_survival` / `--fot_votes` to cut cost. The executable regime costs `O(K·2)` (one probe settles the verdict); a relational check's `s` completions run in parallel, and `rho_inv` checks cost nothing at all
+5. **FoT**: `O(K·(1+n))` calls — lower `--fot_budget` / `--fot_probes` to cut cost. The executable regime costs `O(K·2)` (one probe settles the verdict); the orbit's `n` Solve calls run in parallel and are cached across rounds, so rounds 2…K usually cost one Repair call each
 6. **APPS**: Execution timeout applies per test case to prevent infinite loops
 7. **Code execution**: `--{bot,rot}_code_timeout` bounds each generated-program run; repair attempts multiply LLM calls
 
@@ -562,7 +563,7 @@ python -m unittest tests.test_metrics tests.test_bot  # several
 | Add CLI flag | `main.py` argument group functions |
 | Update metrics | `utils/metrics.py`, `utils/get_mean_std.py` |
 | Add an FoT checker | `baseline/FoT/checkers.py` `CHECKERS` dict (keyed by `benchmark` or `benchmark:subtask`) |
-| Add an FoT relation | `baseline/FoT/relations.py` `CATALOGUES` dict (set `family` to `bwd` / `mr` / `inv`) |
+| Add an FoT relation | `baseline/FoT/relations.py` `CATALOGUES` dict (a `Relation` is `(T, rho)`; set `direction` and, for answer-transforming relations, `expected_for` / `pullback`) |
 | Add an eval sweep | `eval/eval_<baseline>.sh` |
 
 ### Supported Models (MODEL_REGISTRY prefixes)

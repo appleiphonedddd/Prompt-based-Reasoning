@@ -1,44 +1,31 @@
 """
-The relation library R_q for Falsification-of-Thought (FoT), §3.3.2 of the paper.
+The relation catalogue C for Falsification-of-Thought (FoT), §2.6 of the paper.
 
-A *relation schema* is a pair ``rho = (T, phi)`` where ``T`` constructs a check
-instance from ``(q, a)`` and ``phi`` is the deterministic output relation the
-instance must satisfy. ``rho`` is *valid* for a task if ``phi`` holds whenever
-the answers involved are the ground-truth ones. Validity makes ``phi`` a
+A *metamorphic relation* (Definition 1) is a pair ``R = (T, rho)`` where
+``T : Q -> Q`` is an input transformation and ``rho`` is an output relation. ``R``
+is *valid* for a task if ``rho(a*(q), a*(T(q)))`` holds for every query q of that
+task, writing ``a*(.)`` for the ground-truth answer. Validity makes ``rho`` a
 necessary property of the intended functionality — the role played by the
-model-invented necessary conditions in the pilot, except that ``phi`` is fixed
-offline and audited once by a human instead of being re-invented per query.
+model-invented necessary conditions in the pilot, except that ``rho`` is fixed in
+advance and inspected once by a human instead of being re-invented per query.
 
-FoT uses the paper's three schema families, tagged by ``Relation.family``:
+Many relations are answer-preserving (``rho`` is equality); others are
+answer-transforming with a known map ``g``, so that ``rho(a, a') <=> a' = g(a)``.
+Each :class:`Variant` therefore carries both ``g`` (``expected_for``, used to
+render the witness) and ``g^-1`` (``pullback``, used to pull the variant's answer
+back into the coordinate frame of q, where it joins the orbit O).
 
-  * ``"bwd"`` — **backward substitution** ``rho_bwd``. The driver mechanically
-    enumerates the quantities stated in ``q`` (numeric literals) and masks one as
-    ``X``; the model re-derives it from the candidate through ``pi_mask``, and
-    ``phi: x_hat = x``. This is the Self-Verification / FOBAR construction,
-    repurposed from vote-weighting to witness generation.
-  * ``"mr"`` — **metamorphic transformation** ``rho_mr = (T, phi)``. ``T``
-    perturbs the query into a follow-up ``q_f``; the model solves ``q_f`` with
-    ``pi_solve`` (never seeing the candidate), and ``phi(a, a_f)`` is checked
-    mechanically. Semantics-preserving transforms have ``phi: a_f = a``;
-    covariant transforms (scaling) have a task-declared ``phi``, e.g.
-    ``a_f = c * a``.
-  * ``"inv"`` — **mechanical invariant** ``rho_inv``. The comparator computes
-    *both* sides from the problem data and the candidate, so the check costs no
-    model call at all (e.g. the vertex count and path closure that an SVG path
-    implies, versus the ones the named shape implies).
+Soundness (Proposition 1): if ``R`` is valid and ``not rho(a, a')``, then ``a``
+or ``a'`` is wrong — as a matter of logic, with no appeal to the model's opinion
+of its own work. The residual unsoundness is confined to (i) an invalid relation
+in this file and (ii) attribution (the defect may sit at ``a'``). Item (i) is a
+design-time property of the small table below; **this module is the artifact to
+audit**.
 
-Soundness (§3.6, the ladder): a violated *valid* relation certifies that some
-answer involved is wrong — as a matter of logic, with no appeal to the model's
-opinion of its own work. The residual unsoundness is therefore confined to
-(i) an invalid relation in this file, (ii) a systematic majority error in the
-voted derivation, and (iii) attribution (for ``mr`` the defect may sit at
-``a_f``, which is why ``pi_rep`` explicitly licenses the model to defend its
-answer). Item (i) is a design-time property of the small table below; **this
-module is the artifact to audit**.
-
-Two properties are required of every entry: the relation must be valid, and its
-image must be answered at least as reliably as its source. Distractor insertion
-is a valid relation but is *excluded* on the second ground.
+Two properties are required of every entry (Remark 2): the relation must be
+valid, and its image must be answered at least as reliably as its source, which
+is recorded in ``Relation.direction``. Distractor insertion is a valid relation
+but is *excluded* on the second ground.
 
 Most transformations here are purely programmatic (rescaling numbers, masking a
 literal, permuting sentences or answer options, applying an affine map to an SVG
@@ -46,28 +33,30 @@ path, renaming identifiers), so they cost no model call and leave no room for
 hallucination in ``T`` itself. Only paraphrase-style transformations (``apply is
 None``) are delegated to the model through the ``pi_mr`` template; those are all
 answer-preserving *and* mechanically validated afterwards to preserve every
-numeric literal of the original (``preserve_numbers``), exactly as §3.3.2
-requires of model-instantiated transforms.
+numeric literal of the original (``preserve_numbers``).
 
 Audit notes on the entries below:
 
-  * ``scale_quantities`` (MGSM) is the paper's ``(T_scale, phi_lin)`` and is
-    valid only when the answer is homogeneous of degree one in the scaled
-    quantities. It is *not* valid when a problem multiplies two scaled quantities
-    together (a price times a count scales as ``c^2``), so it can manufacture a
-    spurious violation. Under the new driver a single violation is decisive, so
-    the guards are now (a) library *ordering* — it sits last, behind the backward
-    and semantics-preserving relations, and the driver returns on the first
-    violation, so it is only ever reached once the sounder checks have abstained;
-    (b) the voted derivation; and (c) ``pi_rep``'s licence to defend the
-    candidate against a pair-implicating witness. Drop it entirely with
-    ``--fot_relations`` if a stricter library is wanted.
-  * ``mask_quantity`` is the one relation whose check instance deliberately
-    contains the candidate (that is what backward substitution *is*: recover a
-    masked premise *from* the conclusion). The independence requirement — the
-    candidate must not be shown to the solver — applies to the ``mr`` family,
-    where showing it would make the follow-up an echo; here the candidate is the
-    input of a different question.
+  * ``scale_quantities`` (MGSM) is valid only when the answer is homogeneous of
+    degree one in the scaled quantities. It is *not* valid when a problem
+    multiplies two scaled quantities together (a price times a count scales as
+    ``c^2``), so it can manufacture a spurious violation. Two factors are
+    catalogued rather than one, which makes the relation self-checking: the
+    pull-backs ``a'/2`` and ``a'/3`` land on the same orbit member exactly when
+    the answer really is homogeneous of degree one, so where the relation does
+    not hold the orbit fragments, no answer takes the majority and Remark 3's
+    acceptance rule blocks the repair. Drop it entirely with ``--fot_relations``
+    if a stricter catalogue is wanted.
+  * ``mask_quantity`` is the backward-verification entry of §2.6: masking a
+    quantity and requiring the candidate answer to recover it is an
+    answer-transforming relation whose follow-up question is written by a fixed
+    template. It is the one relation whose variant deliberately contains the
+    candidate — that is what backward substitution *is* (recover a masked premise
+    *from* the conclusion). Remark 1's independence requirement applies to the
+    relations whose variant re-asks the *same* question, where showing the
+    candidate would make the follow-up an echo; here the candidate is the input
+    of a different question. Its answer lives in a different space, so it
+    contributes a violation but no orbit member (``pullback is None``).
 """
 
 from __future__ import annotations
@@ -125,7 +114,7 @@ def numbers_equal(x: Optional[float], y: Optional[float], tol: float = 1e-6) -> 
 
 
 def answers_equal(a: str, b: str) -> bool:
-    """phi for answer-preserving relations: numeric when both parse, else textual."""
+    """rho for answer-preserving relations: numeric when both parse, else textual."""
     la, lb = option_letter(a), option_letter(b)
     if la and lb:
         return la == lb
@@ -135,16 +124,32 @@ def answers_equal(a: str, b: str) -> bool:
     return normalize_answer(a) == normalize_answer(b)
 
 
+def answer_key(answer: str) -> str:
+    """Canonical key for grouping answers, consistent with :func:`answers_equal`.
+
+    The driver counts orbit members with it (Majority(O) in Algorithm 2, line 16),
+    so two answers that ``answers_equal`` considers the same must land on the same
+    key: an option letter first, then a numeric value, then normalised text.
+    """
+    letter = option_letter(answer)
+    if letter is not None:
+        return f"({letter})"
+    number = parse_number(answer)
+    if number is not None:
+        return _fmt(number)
+    return normalize_answer(answer)
+
+
 _ANY_NUM = re.compile(r"\d+(?:\.\d+)?")
 
 
 def numeric_literals(text: str) -> List[str]:
     """The multiset of numeric literals in a text, normalised for comparison.
 
-    Used to validate model-instantiated transforms: §3.3.2 requires that a
-    textual transform be "mechanically validated to preserve every numeric
-    literal it is required to preserve", so a paraphrase that quietly drops or
-    invents a quantity is rejected rather than checked.
+    Used to validate model-instantiated transforms: a textual transform must be
+    mechanically validated to preserve every numeric literal it is required to
+    preserve, so a paraphrase that quietly drops or invents a quantity is rejected
+    rather than checked against a relation it no longer satisfies.
     """
     return sorted(_fmt(float(m.group(0))) for m in _ANY_NUM.finditer(text))
 
@@ -153,31 +158,21 @@ def numeric_literals(text: str) -> List[str]:
 
 @dataclass
 class Variant:
-    """One realised *check instance*: what to ask, and how to judge the reply.
-
-    The same container serves all three schema families; ``family`` says how the
-    driver must realise it.
+    """One realised member of the orbit: ``q' = T(q)`` plus how to judge its answer.
 
     Attributes:
-        relation: name of the relation rho that produced this instance.
-        relation_text: phi, written out for the witness and the repair prompt.
-        family: "bwd" (solve ``question`` with pi_mask, parse DERIVED:),
-            "mr" (solve ``question`` with pi_solve, parse ANSWER:), or "inv"
-            (no model call at all — ``expected`` and ``observed`` are already
-            filled in by the comparator).
-        question: the instance handed to the model — ``q`` with one quantity
-            masked (bwd) or ``q_f = T(q)`` (mr). Empty for "inv".
-        holds: phi — evaluated by the driver, never by the model. Called as
-            ``holds(a, value)`` where ``value`` is the voted model output.
-        expected: the value phi requires, when it does not depend on ``a``
-            (bwd: the masked literal; inv: the comparator's left-hand side).
-        observed: inv only — the comparator's right-hand side.
-        detail: inv only — a sentence explaining what the two sides mean.
-        expected_for: for "mr", phi(a): the answer the follow-up *must* receive
-            given the candidate, used to render the witness.
-        pullback: g^-1, mapping the instance's answer back into q's frame. None
-            when the instance answers a *different* question (bwd).
-        slot: bwd only — the stated quantity that was masked (NextSlot's choice).
+        relation: name of the relation R that produced this variant.
+        relation_text: rho, written out for the witness and the repair prompt.
+        question: the variant q' handed to SOLVE. Never carries the candidate,
+            except for ``mask_quantity`` (see the module docstring).
+        holds: rho — evaluated by the driver, never by the model. Called as
+            ``holds(a, a_prime)``.
+        expected_for: g, i.e. rho(a): the answer this variant *must* receive given
+            the candidate. Rendered into the witness; None when not determined.
+        pullback: g^-1, mapping the variant's answer back into q's frame so it can
+            join the orbit O. None when the variant answers a *different* question
+            (backward substitution), in which case it contributes no orbit member.
+        slot: for ``mask_quantity`` — the stated quantity that was masked.
         source: "programmatic" (T ran as code) or "model" (T came from pi_mr).
     """
 
@@ -185,44 +180,33 @@ class Variant:
     relation_text: str
     question: str
     holds: Callable[[str, str], bool]
-    family: str = "mr"
-    expected: Optional[str] = None
-    observed: Optional[str] = None
-    detail: str = ""
     expected_for: Optional[Callable[[str], Optional[str]]] = None
     pullback: Optional[Callable[[str], Optional[str]]] = None
     slot: Optional[str] = None
     source: str = "programmatic"
 
     def expected_value(self, answer: str) -> Optional[str]:
-        """What phi requires the instance's answer to be, given the candidate."""
-        if self.expected is not None:
-            return self.expected
+        """g(a): what rho requires this variant's answer to be, given ``a``."""
         return self.expected_for(answer) if self.expected_for is not None else None
 
 
 @dataclass
 class Relation:
-    """A library entry rho = (T, phi).
+    """A catalogue entry R = (T, rho).
 
     Attributes:
         name: stable identifier, usable with ``--fot_relations``.
         transformation: one-line description of T. Doubles as the instruction
             handed to pi_mr when T cannot be applied programmatically.
-        direction: "symmetric" or "increasing" — the reliability requirement.
-            Every library entry must be non-decreasing in reliability.
-        relation_text: phi, in words.
-        family: "bwd" | "mr" | "inv" (see :class:`Variant`).
-        apply: programmatic T for the "mr" family. Returns a Variant, or None
-            when the relation does not apply to this particular query (which is
-            not a violation — the relation is simply skipped). When None *and*
-            the family is "mr", the transformation is delegated to the model via
-            pi_mr and phi is equality.
-        apply_slot: T for the "bwd" family, taking the slot index chosen by
-            NextSlot so that successive attempts mask *distinct* quantities.
-        invariant: for the "inv" family — computes
-            ``(expected, observed, detail)`` straight from ``(q, a)``, or None
-            when it does not apply. The first two are compared verbatim.
+        direction: "symmetric" or "increasing" — the reliability requirement of
+            Remark 2. Every entry must be non-decreasing in reliability.
+        relation_text: rho, in words.
+        apply: programmatic T. Returns a Variant, or None when the relation does
+            not apply to this particular query (which is not a violation — the
+            relation is simply skipped). Takes the candidate and a draw index,
+            which only backward substitution uses (to mask a different quantity on
+            successive rounds). When None, T is delegated to the model via pi_mr
+            and rho is equality.
         applicable: optional guard for model-applied relations.
         preserve_numbers: for model-applied T only — reject the model's variant
             unless it carries exactly the numeric literals of the original.
@@ -232,29 +216,24 @@ class Relation:
     transformation: str
     direction: str
     relation_text: str
-    family: str = "mr"
-    apply: Optional[Callable[[str, str], Optional[Variant]]] = None
-    apply_slot: Optional[Callable[[str, str, int], Optional[Variant]]] = None
-    invariant: Optional[
-        Callable[[str, str], Optional[Tuple[str, str, str]]]] = None
+    apply: Optional[Callable[..., Optional[Variant]]] = None
     applicable: Optional[Callable[[str], bool]] = None
     preserve_numbers: bool = True
 
     @property
     def programmatic(self) -> bool:
-        """True iff realising this relation costs no model call to *construct*."""
-        return (self.apply is not None or self.apply_slot is not None
-                or self.invariant is not None)
+        """True iff T costs no model call to apply."""
+        return self.apply is not None
 
 
-def equality_variant(relation: Relation, question: str, source: str = "model") -> Variant:
-    """Build an answer-preserving instance (phi = equality, g = g^-1 = id)."""
+def equality_variant(relation: Relation, question: str,
+                     source: str = "model") -> Variant:
+    """Build an answer-preserving variant (rho = equality, g = g^-1 = id)."""
     return Variant(
         relation=relation.name,
         relation_text=relation.relation_text,
         question=question,
         holds=answers_equal,
-        family="mr",
         expected_for=lambda a: a,
         pullback=lambda a_prime: a_prime,
         source=source,
@@ -306,12 +285,14 @@ def _svg_affine(relation: Relation, question: str,
         source="programmatic")
 
 
-def _apply_translate_scale(question: str, candidate: str) -> Optional[Variant]:
+def _apply_translate_scale(question: str, candidate: str = "",
+                           index: int = 0) -> Optional[Variant]:
     return _svg_affine(REL_SVG_TRANSLATE_SCALE, question,
                        lambda x, y: (1.5 * x + 13.0, 1.5 * y - 7.0))
 
 
-def _apply_rotate(question: str, candidate: str) -> Optional[Variant]:
+def _apply_rotate(question: str, candidate: str = "",
+                  index: int = 0) -> Optional[Variant]:
     parsed = _path_points(question)
     if parsed is None:
         return None
@@ -328,7 +309,8 @@ def _apply_rotate(question: str, candidate: str) -> Optional[Variant]:
     return _svg_affine(REL_SVG_ROTATE, question, _rot)
 
 
-def _apply_reverse(question: str, candidate: str) -> Optional[Variant]:
+def _apply_reverse(question: str, candidate: str = "",
+                   index: int = 0) -> Optional[Variant]:
     """Reverse the traversal order of the vertices.
 
     The path is first canonicalised into a single ``M v1 L v2 ...`` polyline (BBH
@@ -406,7 +388,7 @@ def _permute_options(question: str, name: str, relation_text: str,
         new_lines[i] = f"({letters[pos]}) {bodies[perm(pos, size)]}"
     # letter in the variant -> letter in the original
     back = {letters[pos]: letters[perm(pos, size)] for pos in range(size)}
-    # letter in the original -> letter in the variant (phi, for the witness)
+    # letter in the original -> letter in the variant (g, for the witness)
     fwd = {original: variant for variant, original in back.items()}
 
     def _pull(a_prime: str) -> Optional[str]:
@@ -426,7 +408,6 @@ def _permute_options(question: str, name: str, relation_text: str,
         relation_text=relation_text,
         question="\n".join(new_lines),
         holds=_holds,
-        family="mr",
         expected_for=_fwd,
         pullback=_pull,
         source="programmatic",
@@ -437,17 +418,20 @@ _OPTIONS_RELABELLED = ("the options were relabelled: the chosen letter must deno
                        "the same option text as before")
 
 
-def _apply_options_shift1(question: str, candidate: str) -> Optional[Variant]:
+def _apply_options_shift1(question: str, candidate: str = "",
+                          index: int = 0) -> Optional[Variant]:
     return _permute_options(question, "options_shift1", _OPTIONS_RELABELLED,
                             lambda i, n: (i - 1) % n)
 
 
-def _apply_options_shift2(question: str, candidate: str) -> Optional[Variant]:
+def _apply_options_shift2(question: str, candidate: str = "",
+                          index: int = 0) -> Optional[Variant]:
     return _permute_options(question, "options_shift2", _OPTIONS_RELABELLED,
                             lambda i, n: (i - 2) % n, min_options=3)
 
 
-def _apply_options_reverse(question: str, candidate: str) -> Optional[Variant]:
+def _apply_options_reverse(question: str, candidate: str = "",
+                           index: int = 0) -> Optional[Variant]:
     return _permute_options(question, "options_reverse", _OPTIONS_RELABELLED,
                             lambda i, n: n - 1 - i)
 
@@ -472,111 +456,6 @@ REL_OPTIONS_REVERSE = Relation(
     direction="symmetric",
     relation_text=_OPTIONS_RELABELLED,
     apply=_apply_options_reverse,
-)
-
-
-# ── Mechanical invariant rho_inv (BBH geometric_shapes) ────────────────────────
-#
-# The paper's example of the "inv" family: the comparator computes the vertex
-# count and path closure implied by the SVG path commands, and the ones implied
-# by the shape the candidate names, straight from the problem data. No model call
-# is involved on either side, so a false refutation would require a wrong entry in
-# the table below — an offline, auditable bug rather than a run-time hallucination.
-
-_SHAPE_VERTICES = {
-    "triangle": 3,
-    "quadrilateral": 4, "rectangle": 4, "square": 4, "kite": 4, "rhombus": 4,
-    "trapezoid": 4,
-    "pentagon": 5, "hexagon": 6, "heptagon": 7, "octagon": 8, "nonagon": 9,
-    "decagon": 10,
-}
-# Shapes whose path is an open polyline rather than a closed polygon.
-_SHAPE_OPEN_VERTICES = {"line": 2, "line segment": 2}
-
-
-def _options_map(question: str) -> Dict[str, str]:
-    """letter -> option body, for the multiple-choice block of a question."""
-    out: Dict[str, str] = {}
-    for line in question.splitlines():
-        m = _OPTION_RE.match(line)
-        if m:
-            out[m.group(1)] = m.group(2)
-    return out
-
-
-def _selected_option(question: str, answer: str) -> Optional[str]:
-    """Resolve a candidate answer to the option body it selects."""
-    letter = option_letter(answer)
-    if letter is not None:
-        body = _options_map(question).get(letter)
-        if body is not None:
-            return body.strip().lower()
-    normalised = normalize_answer(answer)
-    return normalised or None
-
-
-def _polygon_walk(question: str) -> Optional[Tuple[int, bool]]:
-    """(vertex count, closed?) for an M/L-only path, or None if not one."""
-    parsed = _path_points(question)
-    if parsed is None:
-        return None
-    _, pts = parsed
-    walk: List[Tuple[float, float]] = []
-    for p in pts:
-        if not walk or walk[-1] != p:
-            walk.append(p)
-    if len(walk) < 2:
-        return None
-    closed = walk[0] == walk[-1]
-    return (len(walk) - 1 if closed else len(walk)), closed
-
-
-def _shape_invariant(question: str, candidate: str
-                     ) -> Optional[Tuple[str, str, str]]:
-    """Compare the vertex count the path draws with the one the answer names.
-
-    Returns ``(expected, observed, detail)``: the first two are rendered in the
-    same shape so that Compare is plain string equality — they differ exactly
-    when the counts differ — and the third explains the check in the witness.
-
-    Abstains (returns None) whenever the two sides are not directly comparable —
-    an unparseable path, an answer naming a curved shape, or a polygon name
-    against a path that does not close — so under-determination can never
-    masquerade as a refutation.
-    """
-    walk = _polygon_walk(question)
-    if walk is None:
-        return None
-    vertices, closed = walk
-    name = _selected_option(question, candidate)
-    if name is None:
-        return None
-    if name in _SHAPE_VERTICES:
-        if not closed:
-            return None
-        n = _SHAPE_VERTICES[name]
-        shape = "closed path"
-    elif name in _SHAPE_OPEN_VERTICES:
-        if closed:
-            return None
-        n = _SHAPE_OPEN_VERTICES[name]
-        shape = "open path"
-    else:
-        return None                               # curved shape: not comparable
-    return (f"{n} vertices in a {shape}",
-            f"{vertices} vertices in a {shape}",
-            f"the answer names a {name}, which has {n} vertices, while the SVG "
-            f"path in the problem is a {shape} on {vertices} vertices")
-
-
-REL_SHAPE_INVARIANT = Relation(
-    name="shape_vertex_count",
-    transformation="count the vertices the SVG path draws and the ones the named shape has",
-    direction="symmetric",
-    relation_text=("the number of vertices the path draws must equal the number the "
-                   "named shape has"),
-    family="inv",
-    invariant=_shape_invariant,
 )
 
 
@@ -606,16 +485,7 @@ def _fmt(value: float) -> str:
 
 
 def _scale_quantities(question: str, factor: float) -> Optional[Variant]:
-    """Multiply every quantity in the problem by c; rho: a' = c * a.
-
-    Two factors are catalogued rather than one, which makes the relation
-    self-checking: the pull-backs a'/2 and a'/3 agree only when the answer really
-    is homogeneous of degree one in the scaled quantities, i.e. exactly when the
-    relation is valid here. Where it is not — an answer that scales as c^2 (a
-    price times a count) or as c^0 (a percentage) — the two pull-backs differ, no
-    answer holds the orbit majority, and Remark 3's acceptance rule blocks the
-    repair instead of acting on an invalid relation.
-    """
+    """Multiply every quantity in the problem by c; rho: a' = c * a."""
     if not _STANDALONE_NUM.search(question):
         return None
     scaled = _STANDALONE_NUM.sub(
@@ -645,14 +515,13 @@ def _scale_quantities(question: str, factor: float) -> Optional[Variant]:
                       f"must be exactly {_fmt(factor)} times the original answer",
         question=scaled,
         holds=_holds,
-        family="mr",
         expected_for=_fwd,
         pullback=_pull,
         source="programmatic",
     )
 
 
-# ── Backward substitution rho_bwd: slot enumeration + masking ──────────────────
+# ── Backward substitution: mask a quantity and re-derive it from a ─────────────
 
 @dataclass
 class Slot:
@@ -661,7 +530,7 @@ class Slot:
     Attributes:
         start, end: character span of the literal in the question.
         text: the literal as written.
-        value: its numeric value, which phi requires the model to re-derive.
+        value: its numeric value, which rho requires the variant to recover.
     """
 
     start: int
@@ -674,8 +543,8 @@ def enumerate_slots(question: str) -> List[Slot]:
     """Enumerate the numeric literals stated in ``q``, left to right.
 
     This is the driver's mechanical stand-in for "the quantities stated in q":
-    NextSlot walks this list so that successive backward checks mask *distinct*
-    premises rather than re-rolling one check.
+    successive draws of ``mask_quantity`` walk this list so that a repaired
+    candidate is attacked on a *different* premise.
     """
     slots: List[Slot] = []
     for m in _STANDALONE_NUM.finditer(question):
@@ -687,32 +556,38 @@ def enumerate_slots(question: str) -> List[Slot]:
     return slots
 
 
-def _apply_mask_quantity(question: str, candidate: str,
-                         slot_index: int = 0) -> Optional[Variant]:
-    """Mask the ``slot_index``-th stated quantity for backward re-derivation.
+# The fixed template that turns "mask the i-th quantity" into a self-contained
+# follow-up question (§2.6). It is solved by pi_solve like any other variant; the
+# candidate appears because it is the *input* of this question, not a suggestion.
+_MASK_TEMPLATE = (
+    "In the problem below, one stated quantity has been replaced by X.\n"
+    "It is given that the final answer to the problem is: {answer}\n"
+    "Working from that answer and the remaining information, determine the "
+    "value of X.\n\n"
+    "Problem (one quantity hidden as X):\n{masked}"
+)
 
-    The instance carries only the *masked* problem; pi_mask supplies the
-    candidate slot and the UNDETERMINED escape. phi holds iff the re-derived
-    value equals the value that was masked out.
-    """
+
+def _apply_mask_quantity(question: str, candidate: str = "",
+                         index: int = 0) -> Optional[Variant]:
+    """Mask the ``index``-th stated quantity; rho: the recovered value = original."""
     slots = enumerate_slots(question)
     if not slots or not candidate.strip():
         return None
-    slot = slots[slot_index % len(slots)]
+    slot = slots[index % len(slots)]
     masked = question[:slot.start] + "X" + question[slot.end:]
 
-    def _holds(a: str, derived: str) -> bool:
-        n = parse_number(derived)
+    def _holds(a: str, recovered: str) -> bool:
+        n = parse_number(recovered)
         return True if n is None else numbers_equal(n, slot.value)
 
     return Variant(
         relation="mask_quantity",
-        relation_text=(f"the hidden quantity X must re-derive to the value the "
+        relation_text=(f"the hidden quantity X must come back out as the value the "
                        f"problem states for it, {_fmt(slot.value)}"),
-        question=masked,
+        question=_MASK_TEMPLATE.format(answer=candidate.strip(), masked=masked),
         holds=_holds,
-        family="bwd",
-        expected=_fmt(slot.value),
+        expected_for=lambda a, _v=_fmt(slot.value): _v,
         pullback=None,          # answers a different question, not q itself
         slot=slot.text,
         source="programmatic",
@@ -726,7 +601,8 @@ _DEPENDENT_START = re.compile(
     r"the rest|the remainder)\b", re.IGNORECASE)
 
 
-def _apply_permute_premises(question: str, candidate: str) -> Optional[Variant]:
+def _apply_permute_premises(question: str, candidate: str = "",
+                            index: int = 0) -> Optional[Variant]:
     """Rotate the leading premise sentences, keeping the final question in place.
 
     Applied only when no premise opens with a pronoun or discourse connective —
@@ -757,27 +633,12 @@ def _looks_english(text: str) -> bool:
     return hits >= 3 and hits / len(words) > 0.08
 
 
-REL_SCALE_X2 = Relation(
-    name="scale_quantities_x2",
-    transformation="multiply every quantity in the problem by 2",
-    direction="symmetric",
-    relation_text="the answer must be exactly 2 times the original answer",
-    apply=lambda q, a: _scale_quantities(q, 2.0),
-)
-REL_SCALE_X3 = Relation(
-    name="scale_quantities_x3",
-    transformation="multiply every quantity in the problem by 3",
-    direction="symmetric",
-    relation_text="the answer must be exactly 3 times the original answer",
-    apply=lambda q, a: _scale_quantities(q, 3.0),
-)
 REL_MASK = Relation(
     name="mask_quantity",
     transformation="mask one stated quantity and re-derive it from the candidate answer",
     direction="increasing",
-    relation_text="the masked quantity must re-derive exactly",
-    family="bwd",
-    apply_slot=_apply_mask_quantity,
+    relation_text="the masked quantity must be recovered exactly",
+    apply=_apply_mask_quantity,
 )
 REL_PERMUTE_PREMISES = Relation(
     name="permute_premises",
@@ -794,6 +655,20 @@ REL_TRANSLATE_EN = Relation(
     relation_text="the problem is unchanged, so the answer must be identical",
     apply=None,                                   # needs pi_mr (0-1 model call)
     applicable=lambda q: not _looks_english(q),
+)
+REL_SCALE_X2 = Relation(
+    name="scale_quantities_x2",
+    transformation="multiply every quantity in the problem by 2",
+    direction="symmetric",
+    relation_text="the answer must be exactly 2 times the original answer",
+    apply=lambda q, a="", i=0: _scale_quantities(q, 2.0),
+)
+REL_SCALE_X3 = Relation(
+    name="scale_quantities_x3",
+    transformation="multiply every quantity in the problem by 3",
+    direction="symmetric",
+    relation_text="the answer must be exactly 3 times the original answer",
+    apply=lambda q, a="", i=0: _scale_quantities(q, 3.0),
 )
 
 
@@ -842,14 +717,16 @@ class _DeadCodeInserter(ast.NodeTransformer):
         return node
 
 
-def _apply_rename_identifiers(question: str, candidate: str) -> Optional[Variant]:
+def _apply_rename_identifiers(question: str, candidate: str = "",
+                              index: int = 0) -> Optional[Variant]:
     src = _rewrite_code(question, lambda t: _LocalRenamer().visit(t))
     if src is None or src == question:
         return None
     return equality_variant(REL_RENAME, src, source="programmatic")
 
 
-def _apply_insert_dead_code(question: str, candidate: str) -> Optional[Variant]:
+def _apply_insert_dead_code(question: str, candidate: str = "",
+                            index: int = 0) -> Optional[Variant]:
     src = _rewrite_code(question, lambda t: _DeadCodeInserter().visit(t))
     if src is None or src == question:
         return None
@@ -872,26 +749,21 @@ REL_DEAD_CODE = Relation(
 )
 
 
-# ── The library: task -> R_q ───────────────────────────────────────────────────
+# ── The catalogue: task -> C ───────────────────────────────────────────────────
 #
-# ORDER IS PART OF THE DESIGN. Falsify draws one relation per attempt with Next()
-# and returns on the *first* violation, so each library is sorted by its rung on
-# the soundness ladder: mechanical invariants (no model call) first, then
-# backward substitution, then semantics-preserving transforms (phi = equality),
-# and covariant transforms (scaling, whose validity is conditional on
-# homogeneity) last — they are only reached once the sounder checks abstain.
+# Table 3 of the paper. Sample(C, n) draws the first n *applicable* entries in
+# this order, so the order is part of the design: the relations whose image is
+# answered at least as reliably as its source come first, and the covariant ones
+# (scaling, whose validity is conditional on homogeneity) come last.
 
 _CODE_RELATIONS = [REL_RENAME, REL_DEAD_CODE]
 _OPTION_RELATIONS = [REL_OPTIONS_SHIFT1, REL_OPTIONS_REVERSE, REL_OPTIONS_SHIFT2]
 
 CATALOGUES: Dict[str, List[Relation]] = {
-    # §4.2's worked instantiation: R_q = {rho_bwd, (T_scale, phi_lin)}, plus the
-    # two answer-preserving transforms that apply to word problems.
     "mgsm": [REL_MASK, REL_PERMUTE_PREMISES, REL_TRANSLATE_EN,
              REL_SCALE_X2, REL_SCALE_X3],
-    "bigbenchhard:geometric_shapes": [REL_SHAPE_INVARIANT, REL_SVG_ROTATE,
-                                      REL_SVG_TRANSLATE_SCALE, REL_SVG_REVERSE,
-                                      REL_OPTIONS_SHIFT1],
+    "bigbenchhard:geometric_shapes": [REL_SVG_ROTATE, REL_SVG_TRANSLATE_SCALE,
+                                      REL_SVG_REVERSE, REL_OPTIONS_SHIFT1],
     "bigbenchhard": _OPTION_RELATIONS,
     "cruxeval": _CODE_RELATIONS,
     "humaneval": _CODE_RELATIONS,
@@ -908,19 +780,19 @@ DEFAULT_CATALOGUE: List[Relation] = list(_OPTION_RELATIONS)
 
 
 def catalogue_key(task: Optional[str], subtask: Optional[str] = None) -> str:
-    """Build the library lookup key, e.g. 'bigbenchhard:geometric_shapes'."""
+    """Build the catalogue lookup key, e.g. 'bigbenchhard:geometric_shapes'."""
     base = (task or "").lower()
     return f"{base}:{subtask.lower()}" if subtask else base
 
 
 def get_catalogue(task: Optional[str], subtask: Optional[str] = None,
                   names: Optional[List[str]] = None) -> List[Relation]:
-    """Return R_q for a task, optionally restricted to the named relations.
+    """Return C for a task, optionally restricted to the named relations.
 
     Lookup is most-specific-first (``task:subtask`` then ``task``), mirroring
-    ``HasChecker``: the library is fixed per benchmark at construction time,
+    ``HasChecker``: the catalogue is fixed per benchmark at construction time,
     never chosen at run time by the model. The returned order is the order in
-    which ``Next(R_q)`` will draw from it.
+    which ``Sample(C, n)`` will draw from it.
     """
     base = (task or "").lower()
     cat = (CATALOGUES.get(catalogue_key(task, subtask))
