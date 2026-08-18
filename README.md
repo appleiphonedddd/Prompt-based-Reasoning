@@ -58,20 +58,6 @@ The gap widens on harder tasks — multi-step math, logical deduction, creative 
 
 ---
 
-## 🗺️ Support Matrix
-
-### LLM Providers
-
-| Provider | Model Examples | Inference |
-|---|---|---|
-| Alibaba | `qwen2.5:32b`, `qwen2.5:14b`, `qwen3:8b` | Local via Ollama |
-| Meta | `llama3.1:8b`, `llama3.1:70b`, `llama3.3:70b` | Local via Ollama |
-| OpenAI | `gpt:gpt-4o`, `gpt:gpt-4o-mini` | Cloud API |
-| Google | `gemini:gemini-2.0-flash`, `gemini:gemini-1.5-pro` | Cloud API |
-| DeepSeek | `deepseek:deepseek-chat` | Cloud API |
-
----
-
 ## ⚡ Quick Start
 
 ### Step 1 — Create Environment
