@@ -15,7 +15,20 @@ from benchmark.BigBenchHard.bigbenchhard import (
     BigBenchHardTask,
     _extract_answer_from_text,
     _normalize_whitespace,
+    _parse_options,
+    _resolve_choice_by_text,
     TASK_ANSWER_TYPES,
+)
+
+GEOMETRIC_SHAPES_Q = (
+    'This SVG path element <path d="M 55.57,80.69 L 57.38,65.80"/> draws a\n'
+    "Options:\n"
+    "(A) circle\n"
+    "(B) heptagon\n"
+    "(C) hexagon\n"
+    "(D) kite\n"
+    "(E) line\n"
+    "(J) triangle"
 )
 
 
@@ -286,6 +299,109 @@ class TestBigBenchHardDatasetLoading(unittest.TestCase):
         ds = BigBenchHard(task="boolean_expressions")
         self.assertIn("boolean_expressions", ds.dataset_name)
         self.assertIn("BigBenchHard", ds.dataset_name)
+
+
+class TestOptionParsing(unittest.TestCase):
+    """Test recovery of the option letter from an answer given as option text."""
+
+    OPTIONS = {"a": "circle", "b": "heptagon", "d": "kite", "j": "triangle"}
+
+    def test_parse_options(self):
+        """Option lines are parsed into a lowercased letter -> body map."""
+        options = _parse_options(GEOMETRIC_SHAPES_Q)
+        self.assertEqual(options["b"], "heptagon")
+        self.assertEqual(options["j"], "triangle")
+        self.assertEqual(len(options), 6)
+
+    def test_parse_options_absent(self):
+        """A question without an option block yields an empty map."""
+        self.assertEqual(_parse_options("What is 2 + 2?"), {})
+
+    def test_resolve_bare_body(self):
+        """A bare option body resolves to its letter."""
+        self.assertEqual(_resolve_choice_by_text("heptagon", self.OPTIONS), "b")
+
+    def test_resolve_body_in_sentence(self):
+        """A body embedded in a sentence resolves to its letter."""
+        self.assertEqual(
+            _resolve_choice_by_text("the path draws a heptagon", self.OPTIONS), "b")
+
+    def test_resolve_prefers_last_occurrence(self):
+        """When several bodies occur, the last one is the stated answer."""
+        self.assertEqual(
+            _resolve_choice_by_text("not a triangle, but a kite", self.OPTIONS), "d")
+
+    def test_resolve_requires_word_boundary(self):
+        """Matching is word-bounded, never a loose substring."""
+        self.assertIsNone(_resolve_choice_by_text("circles", {"a": "circle"}))
+
+    def test_resolve_ignores_dollar_sign(self):
+        """The prediction has "$" stripped as a LaTeX delimiter; bodies match anyway."""
+        self.assertEqual(
+            _resolve_choice_by_text("my 1000 dollar phone", {"a": "my $1000 dollar phone"}),
+            "a")
+
+    def test_resolve_ambiguous_options(self):
+        """Identical option bodies carry no information and stay unmatched."""
+        self.assertIsNone(_resolve_choice_by_text("same text", {"a": "same text",
+                                                                "b": "same text"}))
+
+    def test_resolve_no_match(self):
+        """An answer naming no option returns None."""
+        self.assertIsNone(_resolve_choice_by_text("dodecahedron", self.OPTIONS))
+
+
+class TestChoiceGradedByOptionText(unittest.TestCase):
+    """A correct multiple-choice answer must not be lost to formatting."""
+
+    def setUp(self):
+        self.ds = BigBenchHard(task="geometric_shapes")
+        # Stand in for load_dataset()/get_problem() so the test stays offline.
+        self.ds._last_problem = type("P", (), {
+            "ground_truth": "(B)",
+            "metadata": {"options": _parse_options(GEOMETRIC_SHAPES_Q)},
+        })()
+
+    def test_option_text_scored_correct(self):
+        """"heptagon" is the body of "(B)" and is scored correct."""
+        result = self.ds.evaluate_answer("heptagon", "(B)")
+        self.assertTrue(result.is_correct)
+        self.assertEqual(result.details["extracted_normalized"], "b")
+
+    def test_option_text_with_article(self):
+        """The bare-letter fallback must not reduce "a heptagon" to "a"."""
+        self.assertTrue(self.ds.evaluate_answer("The answer is a heptagon.", "(B)").is_correct)
+
+    def test_wrong_option_text_scored_incorrect(self):
+        """A different shape is still wrong."""
+        self.assertFalse(self.ds.evaluate_answer("triangle", "(B)").is_correct)
+
+    def test_letter_still_wins(self):
+        """An explicit letter takes precedence over any body text."""
+        self.assertTrue(self.ds.evaluate_answer("(B) heptagon", "(B)").is_correct)
+
+    def test_stale_problem_not_reused(self):
+        """Grading another question's ground truth falls back to letter matching."""
+        result = self.ds.evaluate_answer("heptagon", "(C)")
+        self.assertFalse(result.is_correct)
+        self.assertEqual(result.details["options"], {})
+
+
+class TestChoiceInstruction(unittest.TestCase):
+    """Choice tasks are graded on the letter, so the prompt must request one."""
+
+    def test_choice_tasks_request_a_letter(self):
+        for task, answer_type in TASK_ANSWER_TYPES.items():
+            instruction = BigBenchHard(task=task).get_instruction()
+            if answer_type == "choice":
+                self.assertIn("letter", instruction, f"{task} does not ask for a letter")
+            else:
+                self.assertNotIn("letter", instruction, f"{task} wrongly asks for a letter")
+
+    def test_choice_instruction_not_boolean(self):
+        """geometric_shapes used to ask for "True, False, or the requested property"."""
+        instruction = BigBenchHard(task="geometric_shapes").get_instruction()
+        self.assertNotIn("True", instruction)
 
 
 class TestTaskAnswerTypes(unittest.TestCase):

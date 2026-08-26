@@ -185,6 +185,80 @@ def _extract_answer_from_text(text: str) -> str:
     return _normalize_whitespace(text)
 
 
+# Option lines of a multiple-choice question, e.g. "(B) heptagon".
+_OPTION_LINE_RE = re.compile(r"^\s*\(([A-Za-z])\)\s*(.*\S)\s*$")
+
+
+def _parse_options(question: str) -> dict:
+    """Map option letter -> option body for a multiple-choice question.
+
+    BBH renders the options one per line after an ``Options:`` header::
+
+        Options:
+        (A) circle
+        (B) heptagon
+
+    Returns an empty dict for tasks (or questions) without an option block.
+    Letters are lowercased and bodies normalized so the map can be compared
+    against a normalized prediction directly.
+    """
+    options: dict = {}
+    for line in question.splitlines():
+        match = _OPTION_LINE_RE.match(line)
+        if match:
+            options[match.group(1).lower()] = _normalize_whitespace(match.group(2)).lower()
+    return options
+
+
+def _resolve_choice_by_text(text: str, options: dict) -> Optional[str]:
+    """Recover the option letter from an answer given as the option *body*.
+
+    Models frequently answer a multiple-choice question with the option text
+    ("heptagon") rather than its label ("(B)"). Matching that text back to its
+    letter is what keeps such an answer from being scored wrong on formatting
+    alone.
+
+    Matching is exact (word-bounded substring), never fuzzy. When several
+    option bodies occur, the one occurring *last* wins — models state the final
+    answer at the end ("not a triangle, but a kite") — with the longer body
+    breaking a tie at the same position.
+
+    Args:
+        text: Normalized (lowercased, whitespace-collapsed) prediction.
+        options: Letter -> body map from :func:`_parse_options`.
+
+    Returns:
+        The matching option letter, or ``None`` if no body occurs in ``text``.
+    """
+    # Match on the same form the prediction is in: _extract_answer_from_text
+    # strips "$" as a LaTeX delimiter, so an option body like "$1000 phone"
+    # would otherwise never occur in it.
+    bodies = {
+        letter: re.sub(r"\$", "", _normalize_whitespace(body).lower()).strip().rstrip(".").strip()
+        for letter, body in options.items()
+    }
+    # Two letters that collapse to the same text carry no information; matching
+    # either would be a coin flip, so neither is matchable.
+    ambiguous = {b for b in bodies.values() if list(bodies.values()).count(b) > 1}
+
+    best_letter: Optional[str] = None
+    best_key: Optional[tuple] = None
+
+    for letter, body in bodies.items():
+        if not body or body in ambiguous:
+            continue
+        last = None
+        for match in re.finditer(rf"(?<!\w){re.escape(body)}(?!\w)", text):
+            last = match
+        if last is None:
+            continue
+        key = (last.start(), len(body))
+        if best_key is None or key > best_key:
+            best_key, best_letter = key, letter
+
+    return best_letter
+
+
 class BigBenchHard(DatasetBase):
     """Benchmark wrapper for all 27 BIG-Bench Hard reasoning tasks.
 
@@ -223,6 +297,12 @@ class BigBenchHard(DatasetBase):
             ) from exc
 
         super().__init__(split=split, dataset_name=f"BigBenchHard[{task}]")
+
+        # Last problem handed out by get_problem(). evaluate_answer() only
+        # receives (prediction, ground_truth), but resolving a text answer such
+        # as "heptagon" back to "(B)" needs that question's option block; the
+        # evaluation loop grades each problem right after fetching it.
+        self._last_problem: Optional[Problem] = None
 
     # ── Abstract method implementations ───────────────────────────────────
 
@@ -289,15 +369,19 @@ class BigBenchHard(DatasetBase):
         question = row.get("input", "")
         answer = row.get("target", "")
 
-        return Problem(
+        question = question.strip()
+        problem = Problem(
             index=index,
-            question=question.strip(),
+            question=question,
             ground_truth=answer.strip() if isinstance(answer, str) else str(answer),
             metadata={
                 "raw_row": dict(row),
                 "task": self.task,
+                "options": _parse_options(question),
             },
         )
+        self._last_problem = problem
+        return problem
 
     def evaluate_answer(
         self,
@@ -321,9 +405,12 @@ class BigBenchHard(DatasetBase):
         # Determine task answer type
         answer_type = TASK_ANSWER_TYPES.get(self.task, "default")
 
+        # Options of the question being graded, when it is the one just fetched
+        options = self._options_for(ground_truth)
+
         # Normalize both for comparison
-        extracted_normalized = self._normalize_answer(extracted, answer_type)
-        truth_normalized = self._normalize_answer(str(ground_truth), answer_type)
+        extracted_normalized = self._normalize_answer(extracted, answer_type, options)
+        truth_normalized = self._normalize_answer(str(ground_truth), answer_type, options)
 
         # Exact match evaluation
         is_correct = extracted_normalized == truth_normalized
@@ -335,6 +422,7 @@ class BigBenchHard(DatasetBase):
             "truth_normalized": truth_normalized,
             "task": self.task,
             "answer_type": answer_type,
+            "options": options,
         }
 
         return EvaluationResult(
@@ -347,13 +435,30 @@ class BigBenchHard(DatasetBase):
 
     # ── Task-specific normalization helpers ────────────────────────────────
 
+    def _options_for(self, ground_truth: Any) -> dict:
+        """Return the option map of the problem currently being graded.
+
+        Falls back to an empty map when ``evaluate_answer`` is called outside
+        the fetch-then-grade loop (the stashed problem's ground truth then no
+        longer matches), so a standalone call degrades to letter-only matching
+        rather than borrowing another question's options.
+        """
+        problem = self._last_problem
+        if problem is None:
+            return {}
+        if str(problem.ground_truth).strip() != str(ground_truth).strip():
+            return {}
+        return problem.metadata.get("options") or {}
+
     @staticmethod
-    def _normalize_answer(text: str, answer_type: str) -> str:
+    def _normalize_answer(text: str, answer_type: str, options: Optional[dict] = None) -> str:
         """Normalize answer based on task type.
 
         Args:
             text: Raw answer text.
             answer_type: One of: "boolean", "numeric", "choice", "word_list", "default".
+            options: Letter -> body map of the question, used to score a
+                multiple-choice answer given as the option text.
 
         Returns:
             Normalized answer for comparison.
@@ -397,7 +502,14 @@ class BigBenchHard(DatasetBase):
             match = re.search(r"\b([a-z])\)", text)
             if match:
                 return match.group(1)
-            # 3. Last isolated single letter.  Models put the answer at the END
+            # 3. Answer given as the option *body* ("heptagon" for "(B) heptagon").
+            # Must precede the bare-letter fallback below, which would otherwise
+            # reduce "a heptagon" to the article "a".
+            if options:
+                letter = _resolve_choice_by_text(text, options)
+                if letter:
+                    return letter
+            # 4. Last isolated single letter.  Models put the answer at the END
             # of their output; taking the last match avoids false hits on common
             # English single-letter words ("i", "a") that appear at the start.
             matches = re.findall(r"\b([a-z])\b", text)
@@ -441,7 +553,7 @@ class BigBenchHard(DatasetBase):
             "disambiguation_qa": "Answer the multiple-choice question.",
             "dyck_languages": "Check if the bracket sequence is valid.",
             "formal_fallacies": "Identify if the argument contains a logical fallacy. Answer True or False.",
-            "geometric_shapes": "Answer questions about geometric shapes. Answer True, False, or the requested property.",
+            "geometric_shapes": "Identify the shape drawn by the SVG path element.",
             "hyperbaton": "Analyze word order and meaning.",
             "logical_deduction_three_objects": "Solve the logical deduction puzzle with three objects.",
             "logical_deduction_five_objects": "Solve the logical deduction puzzle with five objects.",
@@ -450,8 +562,8 @@ class BigBenchHard(DatasetBase):
             "multistep_arithmetic_two": "Solve this multi-step arithmetic problem. Provide the final numerical answer.",
             "navigate": "Follow the navigation instructions and describe the result.",
             "object_counting": "Count the objects in the description.",
-            "penguins_in_a_table": "Answer the question about the table of penguins. Answer True or False.",
-            "reasoning_about_colored_objects": "Reason about objects and their colors. Answer True or False.",
+            "penguins_in_a_table": "Answer the question about the table of penguins.",
+            "reasoning_about_colored_objects": "Reason about objects and their colors.",
             "ruin_names": "Complete or manipulate the word/name.",
             "salient_translation_error_detection": "Identify the translation error.",
             "snarks": "Solve the logic puzzle.",
@@ -463,7 +575,20 @@ class BigBenchHard(DatasetBase):
             "web_of_lies": "Solve the logic puzzle about liars and truth-tellers.",
             "word_sorting": "Sort the words alphabetically or as requested.",
         }
-        return instructions.get(self.task, "")
+        instruction = instructions.get(self.task, "")
+
+        # Multiple-choice tasks are graded against the option letter, so the
+        # prompt has to ask for one. Without this, models answer a
+        # geometric_shapes question with "heptagon" — right, but unscoreable as
+        # a letter — and every letter-based mechanism (e.g. FoT's option
+        # relabelling relations) loses its handle on the answer.
+        if TASK_ANSWER_TYPES.get(self.task) == "choice":
+            instruction = (
+                f"{instruction} Choose one of the listed options and give your "
+                'final answer as that option\'s letter in parentheses, e.g. "(A)".'
+            ).strip()
+
+        return instruction
 
     def get_system_prompt(self) -> Optional[str]:
         """Return task-specific system prompt."""

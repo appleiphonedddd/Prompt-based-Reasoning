@@ -253,6 +253,17 @@ Model must predict the exact Python literal returned by a given function `f(*arg
 - **Numeric** (2): `multistep_arithmetic_two`, `object_counting`
 - **Free-form** (2): `dyck_languages`, `word_sorting`
 
+The 17 multiple-choice tasks are graded against the option **letter**, so `get_instruction()`
+appends an explicit "answer with the option's letter in parentheses" to every one of them.
+Grading is nevertheless format-tolerant: an answer given as the option *body* ("heptagon" for
+"(B) heptagon") is resolved back to its letter via the question's option block, which
+`get_problem()` parses into `metadata["options"]`. The match is exact and word-bounded — never
+fuzzy — the last option body mentioned wins ("not a triangle, but a kite"), and two options with
+identical text stay unmatched rather than being guessed. Because `evaluate_answer(prediction,
+ground_truth)` never sees the question, the option map comes from the problem most recently
+returned by `get_problem()`; a standalone `evaluate_answer` call outside the fetch-then-grade
+loop degrades to letter-only matching.
+
 ---
 
 ## CLI Interface
