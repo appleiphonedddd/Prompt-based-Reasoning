@@ -14,6 +14,7 @@ Available datasets:
     - APPS:                5000 competitive-programming problems (stdin/stdout + fn_name).
     - ClassEval:           100 class-level Python implementation tasks.
     - CRUXEval:            799 code output-prediction tasks (CRUXEval-O).
+    - Checkmate:           3500 checkmate-in-one chess positions (BIG-bench).
 
 Usage::
 
@@ -56,6 +57,11 @@ Usage::
     crux.load_dataset()
     problem = crux.get_problem(0)
 
+    # Checkmate example
+    cm = Checkmate(num_samples=100)
+    cm.load_dataset()
+    problem = cm.get_problem(0)
+
 Author: Egor Morozov
 """
 
@@ -70,6 +76,7 @@ from benchmark.MBPP.mbpp import MBPP
 from benchmark.APPS.apps import APPS
 from benchmark.ClassEval.classeval import ClassEval
 from benchmark.CRUXEval.cruxeval import CRUXEval
+from benchmark.Checkmate.checkmate import Checkmate
 
 # Registry used by main.py for dynamic instantiation.
 # Format: { key: (DatasetClass, kwargs_extractor) }
@@ -93,6 +100,9 @@ DATASET_REGISTRY: dict[str, tuple] = {
     "apps":                (APPS,                 lambda _: {}),
     "classeval":           (ClassEval,            lambda _: {}),
     "cruxeval":            (CRUXEval,             lambda _: {}),
+    "checkmate":           (Checkmate,            lambda a: dict(
+        num_samples=getattr(a, "checkmate_num_samples", None),
+    )),
 }
 
 __all__ = [
@@ -109,5 +119,6 @@ __all__ = [
     "APPS",
     "ClassEval",
     "CRUXEval",
+    "Checkmate",
     "DATASET_REGISTRY",
 ]

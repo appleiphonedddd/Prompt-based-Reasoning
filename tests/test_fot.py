@@ -26,6 +26,8 @@ from typing import List, Optional
 
 from baseline.FoT import Damage, FoT
 from baseline.FoT.checkers import (
+    _HAS_CHESS,
+    checkmate_checker,
     gameof24_checker,
     get_checker,
     has_checker,
@@ -365,6 +367,62 @@ class TestCheckers(unittest.TestCase):
     def test_non_arithmetic_question_is_undecided(self):
         self.assertEqual(
             multistep_arithmetic_checker("How many apples?", "3").verdict, "undecided")
+
+
+# ── 9b. Checkmate checker (needs python-chess) ─────────────────────────────────
+@unittest.skipUnless(_HAS_CHESS, "python-chess is not installed")
+class TestCheckmateChecker(unittest.TestCase):
+    """c_q replays the movetext and asks the board — the model never judges."""
+
+    # Scholar's mate, White to play 4. Qxf7#.
+    Q = "1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6 4."
+
+    def test_the_mating_move_passes(self):
+        r = checkmate_checker(self.Q, "Qxf7#")
+        self.assertEqual(r.verdict, "pass")
+        self.assertIn("checkmated", r.detail)
+
+    def test_it_reads_the_move_out_of_a_reasoning_trace(self):
+        trace = "The knight on f6 guards h5... Therefore, the answer is Qxf7#."
+        self.assertEqual(checkmate_checker(self.Q, trace).verdict, "pass")
+
+    def test_notation_of_the_suffix_does_not_decide_the_verdict(self):
+        """The board decides mate, not the '#' the model happened to type."""
+        self.assertEqual(checkmate_checker(self.Q, "Qxf7+").verdict, "pass")
+        self.assertEqual(checkmate_checker(self.Q, "Qf7").verdict, "pass")
+        self.assertEqual(checkmate_checker(self.Q, "Bxf7#").verdict, "fail")
+
+    def test_a_check_that_is_not_mate_fails_with_a_concrete_escape(self):
+        r = checkmate_checker(self.Q, "Bxf7+")
+        self.assertEqual(r.verdict, "fail")
+        self.assertIn("reply", r.detail)
+
+    def test_a_quiet_move_fails_for_not_giving_check(self):
+        r = checkmate_checker(self.Q, "d3")
+        self.assertEqual(r.verdict, "fail")
+        self.assertIn("does not even give check", r.detail)
+
+    def test_an_illegal_move_fails(self):
+        r = checkmate_checker(self.Q, "Qxh8#")
+        self.assertEqual(r.verdict, "fail")
+        self.assertIn("not a legal move", r.detail)
+
+    def test_an_answer_with_no_move_fails(self):
+        self.assertEqual(checkmate_checker(self.Q, "I cannot tell.").verdict, "fail")
+
+    def test_the_witness_never_leaks_the_mating_move(self):
+        """The repair prompt must not receive the answer the benchmark withholds."""
+        for wrong in ("Bxf7+", "d3", "Nf3", "O-O"):
+            with self.subTest(move=wrong):
+                self.assertNotIn("Qxf7", checkmate_checker(self.Q, wrong).detail)
+
+    def test_an_unreplayable_game_is_undecided(self):
+        r = checkmate_checker("1. e4 e5 2. Qzz9 Nc6", "Qxf7#")
+        self.assertEqual(r.verdict, "undecided")
+
+    def test_registered_as_the_benchmark_checker(self):
+        self.assertTrue(has_checker("checkmate"))
+        self.assertIs(get_checker("checkmate"), checkmate_checker)
 
 
 # ── 10. Executable regime ──────────────────────────────────────────────────────

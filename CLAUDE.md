@@ -6,7 +6,7 @@
 
 - **Multiple LLM Providers**: OpenAI (GPT), DeepSeek, Meta (Llama), Alibaba (Qwen), Google (Gemma), IBM (Granite)
 - **Prompting Baselines**: Standard input, Zero-Shot CoT (two-step & single-pass), Reversal-of-Thought (RoT), Tree-of-Thought (ToT), Buffer-of-Thought (BoT), Graph-of-Thought (GoT), and Falsification-of-Thought (FoT)
-- **Reasoning Benchmarks**: Game of 24, MGSM, Sonnet Writing, BigBenchHard (27 tasks), Programming Puzzles, HumanEval, MBPP, APPS, ClassEval, CRUXEval
+- **Reasoning Benchmarks**: Game of 24, MGSM, Sonnet Writing, BigBenchHard (27 tasks), Checkmate-in-One, Programming Puzzles, HumanEval, MBPP, APPS, ClassEval, CRUXEval
 
 The framework provides standardized evaluation metrics (accuracy, efficiency) and supports both local models (via Ollama) and cloud-based APIs.
 
@@ -95,7 +95,7 @@ Prompt-based-Reasoning/
 ├── results/                 # Auto-created JSON run results (gitignored)
 │
 ├── benchmark/               # Reasoning Task Datasets
-│   ├── __init__.py          # DATASET_REGISTRY (10 benchmarks)
+│   ├── __init__.py          # DATASET_REGISTRY (11 benchmarks)
 │   ├── datasetbase.py       # Abstract DatasetBase, Problem, EvaluationResult
 │   ├── GameOf24/            # Arithmetic puzzle: combine 4 numbers to reach 24
 │   ├── MGSM/                # Multilingual Grade School Math (10 languages)
@@ -106,7 +106,8 @@ Prompt-based-Reasoning/
 │   ├── MBPP/                # 974 Python function generation tasks (Google)
 │   ├── APPS/                # 5000 competitive-programming problems
 │   ├── ClassEval/           # 100 class-level Python implementation tasks
-│   └── CRUXEval/            # 799 code output-prediction tasks (CRUXEval-O)
+│   ├── CRUXEval/            # 799 code output-prediction tasks (CRUXEval-O)
+│   └── Checkmate/           # 3500 checkmate-in-one chess positions (BIG-bench)
 │
 ├── utils/                   # Utility Modules
 │   ├── config.py            # Configuration loading & validation
@@ -173,7 +174,7 @@ Implements the paper's driver loop (Algorithm 4): `a ← Solve(q)`, then up to `
 
 The guiding principle is **refute by construction, not by verdict**: the model is refuted by its own outputs, never by its own self-assessment. No prompt in FoT asks "is this correct?" — the model only ever produces objects (an answer, a probe, a variant of the problem, an answer to that variant) and every accept/refute verdict is issued by a checker or by the driver's own comparison. Two regimes, selected by `HasChecker(q)` — **fixed per benchmark, never decided at run time by the model**:
 
-- **Executable** — for benchmarks with a registered trusted checker `c_q` in `CHECKERS` (`baseline/FoT/checkers.py`): `gameof24` (arithmetic evaluation), `cruxeval` (program execution), `programmingpuzzles` (`sat()` predicate), `bigbenchhard:multistep_arithmetic_two` (expression recomputation). The model only *proposes a probe*; the external checker returns the verdict, so witnesses are **sound** and a correct candidate is never discarded. Checkers return `fail` / `pass` / `undecided`, and `undecided` counts as survival. Keys are `benchmark` or `benchmark:subtask`, resolved most-specific-first. `n` and `τ` are forced to **1** here: `c_q` is deterministic and probe-independent, so a second probe could only repeat the first verdict.
+- **Executable** — for benchmarks with a registered trusted checker `c_q` in `CHECKERS` (`baseline/FoT/checkers.py`): `gameof24` (arithmetic evaluation), `cruxeval` (program execution), `programmingpuzzles` (`sat()` predicate), `bigbenchhard:multistep_arithmetic_two` (expression recomputation), `checkmate` (position replay via `python-chess` — the one **conditional** entry: registered only when `chess` imports, so a host without it falls back to the metamorphic regime, where checkmate has no catalogue and FoT degrades to FoT ≡ Solve). The model only *proposes a probe*; the external checker returns the verdict, so witnesses are **sound** and a correct candidate is never discarded. Checkers return `fail` / `pass` / `undecided`, and `undecided` counts as survival. Keys are `benchmark` or `benchmark:subtask`, resolved most-specific-first. `n` and `τ` are forced to **1** here: `c_q` is deterministic and probe-independent, so a second probe could only repeat the first verdict.
 - **Metamorphic** — every other benchmark. `Sample(C, n)` draws `n` (`--fot_probes`, default 3) relations from a fixed, human-audited catalogue `C` (`baseline/FoT/relations.py`), applies each transformation to the query, solves each variant **independently** with `pi_solve`, and collects the violations `V` together with the orbit `O = {a} ∪ {g⁻¹(a'ᵢ)}`. The witness is `⟨V, O⟩` — a concrete disagreement between the model's own outputs, never an opinion.
 
 Three design decisions carry the weight of the metamorphic branch:
@@ -226,6 +227,7 @@ When execution errors, BoT and RoT attempt inspector-guided repair up to `--{bot
 | `mgsm` | `MGSM` | 250×lang | Multilingual Grade School Math (10 languages: en, de, fr, es, ru, zh, ja, th, sw, bn) |
 | `bigbenchhard` | `BigBenchHard` | 250/task | All 27 BIG-Bench Hard tasks (use `--bigbenchhard_task`) |
 | `sonnetwriting` | `SonnetWriting` | 20 | Shakespearean sonnet generation with constraints |
+| `checkmate` | `Checkmate` | 3500 | Checkmate-in-one: name the mating move in a PGN position (use `--checkmate_num_samples`) |
 
 ### Programming
 | Key | Class | Size | Description |
@@ -246,6 +248,40 @@ Answer extraction always takes the **last** fenced code block so CoT baselines (
 
 ### CRUXEval Evaluation Details
 Model must predict the exact Python literal returned by a given function `f(*args)`. Evaluation uses `ast.literal_eval` when possible, falling back to normalized string comparison.
+
+### Checkmate Evaluation Details
+BIG-bench `checkmate_in_one`, loaded from the local `benchmark/Checkmate/checkmate_in_one.json`
+(the task file verbatim — its `task_prefix` becomes `get_instruction()`'s first line). The
+question is the game's PGN movetext alone; `target_scores` is **never** shown to the model,
+because exactly one of its keys carries the `#` suffix and would give the answer away. It goes
+into `ground_truth["legal_moves"]` (alongside `ground_truth["move"]`) and is used only for
+grading, so `evaluate_answer` stays pure — no `_last_problem` stash as in BigBenchHard.
+
+Grading is notation-tolerant but never fuzzy:
+1. A SAN move is extracted from the raw output, trying regions in order of reliability —
+   `\boxed{…}`, the tail of an "the answer is …" phrase, the last line, then the whole
+   response. Within an answer-announcing region the **first** move wins (the region starts at
+   the answer); within a line or the whole response the **last** one does. A move that is
+   legal in the position always beats one that is not — a CoT trace is full of squares and
+   piece letters, and legality is what separates the move being proposed from the ones being
+   discussed.
+2. The move is canonicalised against the legal-move list, so `Qe7#` is credited as `Qxe7#`.
+   Resolution only fires when the loose form (capture/promotion markers dropped) names
+   **exactly one** legal move; a collision is left unresolved rather than guessed.
+3. Comparison ignores the `+`/`#` suffix and `!?` annotations — the answer is the move, not
+   its punctuation. Move numbers (`32. Qxe7#`) and `0-0` castling spelling are normalised too.
+
+Verified over all 3500 positions: every reference move (stated in prose) grades correct, and
+every one of the ~135k non-mating legal moves grades incorrect.
+
+FoT runs in the **executable regime** here: `checkmate_checker` replays the movetext, plays the
+candidate move and asks `python-chess` whether it is checkmate. Verified over all 3500
+positions — zero correct answers refuted, zero wrong answers passed, zero undecided (≈5 s for
+the sweep). The failure detail is concrete and non-leaking: `"Qg8+ gives check but is not mate:
+the opponent can reply Rxg8"`, never the legal-move set and never the mating move, since that
+detail goes into `pi_rep` and must not hand the model the answer the benchmark withholds.
+The candidate is resolved with the benchmark's own `extract_move`, so the verifier plays exactly
+the move the grader will score.
 
 ### BigBenchHard Task Categories
 - **Boolean/Yes-No** (6): `boolean_expressions`, `causal_judgement`, `formal_fallacies`, `navigate`, `sports_understanding`, `web_of_lies`
@@ -353,6 +389,11 @@ python main.py --model <model> --baseline <baseline> --benchmark <benchmark> [op
 | `--pp_num_samples` | None (all) | Number of puzzles to evaluate |
 | `--pp_module` | None (all) | Filter by module (e.g. `study.py`, `basic.py`, `IMO.py`) |
 
+### Checkmate Options
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--checkmate_num_samples` | None (all 3500) | Positions to evaluate, taken from the front of the task file |
+
 ---
 
 ## Usage Examples
@@ -395,6 +436,10 @@ python main.py --model gpt:gpt-4o --baseline zerocot_single --benchmark humaneva
 python main.py --model gpt:gpt-4o --baseline zerocot_single --benchmark mbpp
 python main.py --model gpt:gpt-4o --baseline zerocot_single --benchmark apps
 python main.py --model qwen2.5:32b --baseline zerocot_single --benchmark cruxeval
+
+# Checkmate-in-one (3500 positions — cap the sweep)
+python main.py --model qwen2.5:32b --baseline zerocot --benchmark checkmate \
+  --checkmate_num_samples 200
 
 # ToT with DFS
 python main.py --model qwen2.5:32b --baseline tot --benchmark gameof24 \
@@ -537,6 +582,10 @@ python -m unittest tests.test_metrics tests.test_bot  # several
 - `test_bot` (4), `test_benchmark` (1)
 
 `tests/test_fot.py` (59 tests, all passing) covers the FoT relation catalogue, the orbit construction and acceptance rule, both falsification regimes, and the driver.
+
+`tests/test_checkmate.py` (39 tests, all passing) covers SAN normalisation, move extraction from
+every baseline's answer shape, canonicalisation against the legal-move list, and grading. Its
+last class exercises the real task file and skips itself when the JSON is absent.
 
 ### Logging
 - Level set to `ERROR` in `main.py` line 26 by default
