@@ -19,11 +19,24 @@ profile):
   * ``bigbenchhard:multistep_arithmetic_two``
                            — arithmetic evaluation: recompute the expression the
                              question states and compare with the answer.
+  * ``checkmate``          — position replay: replay the PGN the question gives,
+                             play the candidate move, and ask the board whether
+                             it is checkmate.
 
 Each checker is deterministic and derives its verdict ONLY from the problem
-statement (which carries the reference function / puzzle numbers / sat predicate)
-and the candidate answer — the model is not involved in the decision. Tasks not
-registered here have ``HasChecker(q) = False`` and fall to the relational regime.
+statement (which carries the reference function / puzzle numbers / sat predicate /
+movetext) and the candidate answer — the model is not involved in the decision.
+Tasks not registered here have ``HasChecker(q) = False`` and fall to the
+relational regime.
+
+One entry is conditional: ``checkmate`` needs the ``python-chess`` package to
+replay a position, and is registered only when it imports. That is an
+environment fact, not a run-time decision — for a given installation
+``HasChecker(q)`` is still fixed per benchmark — but it does mean a run on a host
+without ``python-chess`` falls back to the metamorphic regime, where the
+checkmate benchmark has no catalogue and FoT degrades to FoT ≡ Solve. Check
+``fot._has_checker`` (or the response metadata's ``regime``) if a result looks
+unexpectedly cheap.
 
 The mapping from benchmark to checker realises the paper's ``HasChecker(q)``
 predicate: it is FIXED PER BENCHMARK (keyed by the benchmark name), not decided
@@ -43,6 +56,10 @@ from typing import Callable, Dict, Optional, Tuple
 # code that runs is the benchmark's own, not model-authored verdict logic, so the
 # verdict it yields is sound.
 from baseline.BoT.bot import run_code
+
+# The checkmate checker resolves the candidate with the benchmark's own move
+# extractor, so the move the verifier plays is the move the grader will score.
+from benchmark.Checkmate.checkmate import extract_move
 
 
 @dataclass
@@ -294,6 +311,115 @@ def multistep_arithmetic_checker(
     )
 
 
+# ── Checkmate in one ────────────────────────────────────────────────────────────
+
+# python-chess is what makes this checker sound; without it the benchmark simply
+# has no checker (see the module docstring).
+try:
+    import chess as _chess
+
+    _HAS_CHESS = True
+except ImportError:  # pragma: no cover - depends on the installation
+    _chess = None
+    _HAS_CHESS = False
+
+# PGN decorations that carry no move: comments, NAGs, game results, move numbers.
+_PGN_COMMENT_RE = re.compile(r"\{[^}]*\}")
+_PGN_NAG_RE = re.compile(r"\$\d+")
+_PGN_RESULT_RE = re.compile(r"\b(?:1-0|0-1|1/2-1/2)\b|\*")
+_PGN_MOVE_NUMBER_RE = re.compile(r"\d+\s*\.(?:\.\.)?")
+
+
+def _replay_movetext(movetext: str):
+    """Replay PGN movetext into the position it reaches.
+
+    Returns the board, or None if any token fails to apply — an unreplayable
+    game yields "undecided" rather than a verdict, so a correct answer is never
+    discarded because the *question* could not be parsed.
+    """
+    text = _PGN_COMMENT_RE.sub(" ", movetext)
+    text = _PGN_NAG_RE.sub(" ", text)
+    text = _PGN_RESULT_RE.sub(" ", text)
+    text = _PGN_MOVE_NUMBER_RE.sub(" ", text)
+
+    board = _chess.Board()
+    for token in text.split():
+        try:
+            board.push_san(token)
+        except (ValueError, AssertionError):
+            return None
+    return board
+
+
+def checkmate_checker(
+    question: str, candidate: str, probe: str = "", *, timeout: float = 10.0
+) -> CheckResult:
+    """c_q for checkmate-in-one: play the candidate move and ask the board.
+
+    Sound: the position comes from replaying the question's own movetext and the
+    verdict from ``python-chess``'s rules engine, so a move that really does mate
+    is never refuted. The candidate is resolved with the benchmark's own
+    extractor, so the verifier plays exactly the move the grader will score.
+
+    ``timeout`` is accepted for interface conformance and unused: replaying a
+    game is pure in-process computation, with no subprocess to bound (a full
+    3500-position sweep replays in ~2.5 s).
+
+    The failure detail names one concrete escape — "after Qg8+, Black can reply
+    Kxg8" — never the set of legal moves and never the mating move: the witness
+    has to indict the candidate without handing the repair the answer the
+    benchmark withholds.
+    """
+    if not _HAS_CHESS:  # pragma: no cover - depends on the installation
+        return CheckResult("undecided", "python-chess is not installed")
+
+    board = _replay_movetext(question)
+    if board is None:
+        return CheckResult("undecided", "the movetext could not be replayed")
+    if board.is_game_over():
+        return CheckResult("undecided", "the position given is already final")
+
+    legal_san = [board.san(m) for m in board.legal_moves]
+    written = extract_move(candidate, legal_san)
+    if written is None:
+        return CheckResult(
+            "fail",
+            "the answer names no move in standard algebraic notation, so no "
+            "move can be played on the board (a single move such as Qxe7# is "
+            "the whole answer)",
+        )
+
+    try:
+        move = board.parse_san(written)
+    except (ValueError, AssertionError):
+        return CheckResult(
+            "fail",
+            f"{written} is not a legal move in the position the game reaches",
+        )
+
+    played = board.san(move)
+    board.push(move)
+
+    if board.is_checkmate():
+        return CheckResult("pass", f"after {played} the opponent is checkmated")
+    if board.is_stalemate():
+        return CheckResult("fail", f"after {played} the position is stalemate, not checkmate")
+    if not board.is_check():
+        return CheckResult(
+            "fail",
+            f"{played} does not even give check — after it the opponent's king "
+            f"is not attacked",
+        )
+
+    escape = next(iter(board.legal_moves), None)
+    reply = board.san(escape) if escape is not None else ""
+    return CheckResult(
+        "fail",
+        f"{played} gives check but is not mate: the opponent can reply {reply}"
+        if reply else f"{played} gives check but is not mate",
+    )
+
+
 # ── Registry: realises HasChecker(q), fixed per benchmark ────────────────────────
 
 # Keys are ``benchmark`` or ``benchmark:subtask``; lookup is most-specific-first,
@@ -304,6 +430,12 @@ CHECKERS: Dict[str, Checker] = {
     "programmingpuzzles": programmingpuzzles_checker,
     "bigbenchhard:multistep_arithmetic_two": multistep_arithmetic_checker,
 }
+
+# Conditional: without python-chess there is no way to replay a position, and a
+# checker that always answers "undecided" would be worse than none — it would
+# suppress the metamorphic regime while deciding nothing.
+if _HAS_CHESS:
+    CHECKERS["checkmate"] = checkmate_checker
 
 
 def has_checker(task: Optional[str], subtask: Optional[str] = None) -> bool:

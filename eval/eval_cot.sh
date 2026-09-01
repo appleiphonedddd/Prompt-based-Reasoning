@@ -13,3 +13,11 @@ python main.py --model qwen2.5:32b --baseline zerocot_single --benchmark bigbenc
 python main.py --model qwen2.5:32b --baseline zerocot_single --benchmark cruxeval
 
 python main.py --model qwen2.5:32b --baseline zerocot_single --benchmark programmingpuzzles
+
+python main.py --model qwen2.5:32b --baseline zerocot --benchmark bigbenchhard --bigbenchhard_task movie_recommendation
+
+python main.py --model qwen2.5:32b --baseline zerocot --benchmark bigbenchhard --bigbenchhard_task penguins_in_a_table
+
+python main.py --model qwen2.5:32b --baseline zerocot_single --benchmark bigbenchhard --bigbenchhard_task word_sorting
+
+python main.py --model qwen2.5:32b --baseline zerocot --benchmark bigbenchhard --bigbenchhard_task date_understanding

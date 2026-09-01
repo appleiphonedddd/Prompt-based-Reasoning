@@ -395,7 +395,7 @@ def general_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model",        default="qwen2.5:32b",
                         help="Model name (prefix = provider, e.g. 'gemini:...')")
     parser.add_argument("--benchmark",    default="gameof24",
-                        help="Benchmark / dataset name (gameof24, mgsm, sonnetwriting, bigbenchhard, programmingpuzzles, humaneval, mbpp, apps, classeval, cruxeval)")
+                        help="Benchmark / dataset name (gameof24, mgsm, sonnetwriting, bigbenchhard, programmingpuzzles, humaneval, mbpp, apps, classeval, cruxeval, checkmate)")
     parser.add_argument("--baseline",     default="zerocot",
                         help="Baseline: standard | zerocot | zerocot_single | rot | tot | bot | got | fot")
     parser.add_argument("--num_runs",     type=int, default=1,
@@ -566,6 +566,14 @@ def pp_args(parser: argparse.ArgumentParser) -> None:
                         "(e.g. study.py, basic.py, IMO.py; default: all modules)")
 
 
+def checkmate_args(parser: argparse.ArgumentParser) -> None:
+    g = parser.add_argument_group("Checkmate")
+    g.add_argument("--checkmate_num_samples", type=int, default=None,
+                   help="Checkmate: number of positions to evaluate, taken from the "
+                        "front of the task file (default: all 3500 — a full sweep is "
+                        "expensive, so a few hundred is the usual setting)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Prompt-Based Reasoning Evaluation",
@@ -578,6 +586,7 @@ def build_parser() -> argparse.ArgumentParser:
     got_args(parser)
     fot_args(parser)
     pp_args(parser)
+    checkmate_args(parser)
     return parser
 
 
