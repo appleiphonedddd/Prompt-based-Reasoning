@@ -75,6 +75,7 @@ Audit notes on the entries below:
 from __future__ import annotations
 
 import ast
+import datetime
 import math
 import re
 from dataclasses import dataclass
@@ -582,6 +583,21 @@ REL_SVG_ROTATE90 = Relation(
 _OPTION_RE = re.compile(r"^\s*\(([A-Z])\)\s*(.*\S)\s*$")
 
 
+def _option_block(question: str, min_options: int = 2
+                  ) -> Optional[Tuple[List[str], List[int], List[str], List[str]]]:
+    """Locate a contiguous, uniquely-lettered option block: lines, indices, letters, bodies."""
+    lines = question.splitlines()
+    idx = [i for i, ln in enumerate(lines) if _OPTION_RE.match(ln)]
+    if len(idx) < min_options or idx != list(range(idx[0], idx[0] + len(idx))):
+        return None
+    parsed = [_OPTION_RE.match(lines[i]) for i in idx]
+    letters = [m.group(1) for m in parsed]           # type: ignore[union-attr]
+    bodies = [m.group(2) for m in parsed]            # type: ignore[union-attr]
+    if len(set(letters)) != len(letters):
+        return None
+    return lines, idx, letters, bodies
+
+
 def _permute_options(question: str, name: str, relation_text: str,
                      perm: Callable[[int, int], int], min_options: int = 2
                      ) -> Optional[Variant]:
@@ -592,16 +608,11 @@ def _permute_options(question: str, name: str, relation_text: str,
     ``g^-1`` sends that letter back to the original one. A textbook metamorphic
     relation for multiple choice, and entirely programmatic.
     """
-    lines = question.splitlines()
-    idx = [i for i, ln in enumerate(lines) if _OPTION_RE.match(ln)]
-    if len(idx) < min_options or idx != list(range(idx[0], idx[0] + len(idx))):
+    block = _option_block(question, min_options)
+    if block is None:
         return None
-    parsed = [_OPTION_RE.match(lines[i]) for i in idx]
-    letters = [m.group(1) for m in parsed]           # type: ignore[union-attr]
-    bodies = [m.group(2) for m in parsed]            # type: ignore[union-attr]
+    lines, idx, letters, bodies = block
     size = len(letters)
-    if len(set(letters)) != size:
-        return None
 
     new_lines = list(lines)
     for pos, i in enumerate(idx):
@@ -676,6 +687,209 @@ REL_OPTIONS_REVERSE = Relation(
     direction="symmetric",
     relation_text=_OPTIONS_RELABELLED,
     apply=_apply_options_reverse,
+)
+
+
+# ── Date relations (BBH date_understanding) ────────────────────────────────────
+#
+# Every one of the 250 queries has the same shape: a premise that fixes "today"
+# (often indirectly — "Christmas Eve of 1937", "her 5th visit", "the last day of
+# the first quarter of 2008"), a requested offset, and six MM/DD/YYYY options.
+# Two mechanical attacks follow from that shape, and neither needs a model call:
+#
+#   * **Reformatting the options.** MM/DD/YYYY is ambiguous — one of the task's
+#     own question templates is built on exactly that ambiguity ("In the UK,
+#     people usually put the day before the month") — so writing the options in a
+#     form that cannot be misread is answer-preserving and strictly easier. These
+#     are the reliability-*increasing* entries, and they lead the catalogue.
+#   * **Relabelling the timeline.** Shifting every year by a multiple of 28 maps
+#     the Gregorian calendar onto itself: 28 years is 1461 whole weeks, so the
+#     day of the week is preserved, and the leap pattern is preserved because the
+#     shift is a multiple of 4. Shifting the option years by the same amount
+#     leaves the answer's *letter* unchanged, so rho stays equality. The one
+#     thing that breaks the isomorphism is a century year that is not a leap year
+#     (1900, 2100), so the shift is refused whenever the span crosses one — the
+#     relation becomes unavailable rather than invalid.
+#
+# What is deliberately *not* catalogued: rewriting the options into DD/MM/YYYY
+# (valid, but Remark 2 excludes it — it is the ambiguous direction), and having
+# the model restate the premise with "today" given explicitly (that would require
+# the falsifier to solve the anchor, and a wrong anchor silently changes the
+# question rather than transforming it).
+#
+# Measured on 30 questions with qwen2.5:32b (Solve accuracy 90%), none of these
+# relations turned out to be reliability-*increasing*: the deltas against the
+# source were -3, -3, 0 and -9 points, every relation agreed with the source on
+# about 90% of queries, and where a variant disagreed it was right about half the
+# time. Two consequences are recorded here rather than papered over. First, the
+# entries are labelled "symmetric": the reformatting relations were catalogued on
+# the theory that removing the MM/DD ambiguity would help, and the measurement did
+# not bear that out. Second, FoT has little to offer on this task — a repair
+# fires on a coin flip, and an offline sweep over n in 2..5 and every tau was flat
+# at the Solve baseline. The reason is visible in the residual errors: they are
+# anchor misreadings ("Yesterday, Jan 21, 2011" read as "today is Jan 21"), and an
+# anchor misreading is invariant under every transformation above, so the model
+# reproduces it in each variant and the orbit corroborates the wrong answer. That
+# is the attribution residual of Proposition 1 in its starkest form: self-
+# refutation cannot see an error the model makes identically everywhere. What the
+# catalogue does buy is that the falsifier is no longer inert — the inherited
+# default (three option permutations) fired on 0 of 30 queries.
+
+_MDY_RE = re.compile(r"\b(\d{2})/(\d{2})/(\d{4})\b")
+_YEAR_RE = re.compile(r"\b(1[6-9]\d{2}|2[01]\d{2})\b")
+_ASK_FORMAT = "in MM/DD/YYYY"
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December")
+
+_DATES_SAME_DAY = ("the options denote the same days, only written differently, "
+                   "so the chosen letter must be the same")
+_DATES_SHIFTED = ("every year in the problem and in the options moved by the same "
+                  "whole number of 28-year calendar cycles, so the chosen letter "
+                  "must be the same")
+
+
+def _rewrite_option_bodies(question: str,
+                           render: Callable[[str], Optional[str]]) -> Optional[str]:
+    """Rewrite every option body through ``render``, or skip the relation.
+
+    Skips rather than half-applies: if one body is not a date this relation does
+    not fit the query, and if the rewrite would merge two options into one it is
+    no longer answer-preserving.
+    """
+    block = _option_block(question)
+    if block is None:
+        return None
+    lines, idx, letters, bodies = block
+    rendered = [render(b) for b in bodies]
+    if any(b is None for b in rendered) or rendered == bodies:
+        return None
+    if len(set(rendered)) != len(set(bodies)):
+        return None
+    out = list(lines)
+    for pos, i in enumerate(idx):
+        out[i] = f"({letters[pos]}) {rendered[pos]}"
+    return "\n".join(out)
+
+
+def _parse_mdy(body: str) -> Optional[Tuple[int, int, int]]:
+    """Parse an MM/DD/YYYY option body into (year, month, day), or None."""
+    m = _MDY_RE.fullmatch(body.strip())
+    if not m:
+        return None
+    month, day, year = (int(g) for g in m.groups())
+    try:
+        datetime.date(year, month, day)
+    except ValueError:
+        return None                       # not a real calendar date
+    return year, month, day
+
+
+def _apply_dates_spell_out(question: str, candidate: str = "",
+                           index: int = 0) -> Optional[Variant]:
+    """Write the options as "December 25, 1937" — a form that cannot be misread."""
+    def render(body: str) -> Optional[str]:
+        parsed = _parse_mdy(body)
+        if parsed is None:
+            return None
+        year, month, day = parsed
+        return f"{_MONTH_NAMES[month - 1]} {day}, {year}"
+
+    rewritten = _rewrite_option_bodies(question, render)
+    if rewritten is None or _ASK_FORMAT not in rewritten:
+        return None
+    return equality_variant(REL_DATES_SPELL_OUT,
+                            rewritten.replace(f" {_ASK_FORMAT}", "", 1),
+                            source="programmatic")
+
+
+def _apply_dates_iso(question: str, candidate: str = "",
+                     index: int = 0) -> Optional[Variant]:
+    """Write the options as ISO 8601 — the other unambiguous ordering."""
+    def render(body: str) -> Optional[str]:
+        parsed = _parse_mdy(body)
+        return None if parsed is None else "%04d-%02d-%02d" % parsed
+
+    rewritten = _rewrite_option_bodies(question, render)
+    if rewritten is None or _ASK_FORMAT not in rewritten:
+        return None
+    return equality_variant(REL_DATES_ISO,
+                            rewritten.replace(_ASK_FORMAT, "in YYYY-MM-DD", 1),
+                            source="programmatic")
+
+
+def _crosses_common_century(lo: int, hi: int) -> bool:
+    """True if [lo, hi] contains a century year that is not a leap year."""
+    return any(year % 400 != 0
+               for year in range(lo + (-lo) % 100, hi + 1, 100))
+
+
+def _shift_years(question: str, shift: int) -> Optional[str]:
+    """Relabel every year by ``shift``, or None when the calendar is not preserved."""
+    body = question.split("\nOptions:", 1)[0]
+    body_years = [int(y) for y in _YEAR_RE.findall(body)]
+    all_years = [int(y) for y in _YEAR_RE.findall(question)]
+    if not body_years or not all_years:
+        return None
+    # The answer's own year may sit a year outside the stated span, so pad before
+    # asking whether the shift keeps the calendar isomorphic.
+    lo = min(min(all_years), min(all_years) + shift) - 2
+    hi = max(max(all_years), max(all_years) + shift) + 2
+    if _crosses_common_century(lo, hi):
+        return None
+    shifted = _YEAR_RE.sub(lambda m: str(int(m.group(0)) + shift), question)
+    # Every date the variant mentions must still be a real calendar date.
+    for month, day, year in _MDY_RE.findall(shifted):
+        try:
+            datetime.date(int(year), int(month), int(day))
+        except ValueError:
+            return None
+    return shifted
+
+
+def _apply_dates_shift_back(question: str, candidate: str = "",
+                            index: int = 0) -> Optional[Variant]:
+    shifted = _shift_years(question, -28)
+    if shifted is None:
+        return None
+    return equality_variant(REL_DATES_SHIFT_BACK, shifted, source="programmatic")
+
+
+def _apply_dates_shift_forward(question: str, candidate: str = "",
+                               index: int = 0) -> Optional[Variant]:
+    shifted = _shift_years(question, 28)
+    if shifted is None:
+        return None
+    return equality_variant(REL_DATES_SHIFT_FORWARD, shifted, source="programmatic")
+
+
+REL_DATES_SPELL_OUT = Relation(
+    name="dates_spell_out_options",
+    transformation="write every answer option as a spelled-out date such as "
+                   "'December 25, 1937'",
+    direction="symmetric",
+    relation_text=_DATES_SAME_DAY,
+    apply=_apply_dates_spell_out,
+)
+REL_DATES_ISO = Relation(
+    name="dates_iso_options",
+    transformation="write every answer option in ISO 8601 form, YYYY-MM-DD",
+    direction="symmetric",
+    relation_text=_DATES_SAME_DAY,
+    apply=_apply_dates_iso,
+)
+REL_DATES_SHIFT_BACK = Relation(
+    name="dates_shift_years_back28",
+    transformation="move every year in the problem and its options back by 28 years",
+    direction="symmetric",
+    relation_text=_DATES_SHIFTED,
+    apply=_apply_dates_shift_back,
+)
+REL_DATES_SHIFT_FORWARD = Relation(
+    name="dates_shift_years_28",
+    transformation="move every year in the problem and its options forward by 28 years",
+    direction="symmetric",
+    relation_text=_DATES_SHIFTED,
+    apply=_apply_dates_shift_forward,
 )
 
 
@@ -989,6 +1203,16 @@ CATALOGUES: Dict[str, List[Relation]] = {
                                       REL_SVG_TRANSLATE, REL_SVG_REFLECT,
                                       REL_SVG_ROTATE90, REL_OPTIONS_SHIFT1,
                                       REL_OPTIONS_REVERSE],
+    # Reformatting the options first (unambiguous dates are the reliability-
+    # increasing direction), then the calendar relabellings, then plain option
+    # permutation as the fallback that always applies.
+    # One of each kind of attack first — reformat, relabel the calendar, relabel
+    # the letters — so the three drawn probes are as uncorrelated as this task
+    # allows; the second reformat and the forward shift come after.
+    "bigbenchhard:date_understanding": [REL_DATES_SPELL_OUT, REL_DATES_SHIFT_BACK,
+                                        REL_OPTIONS_SHIFT1, REL_DATES_ISO,
+                                        REL_OPTIONS_REVERSE, REL_DATES_SHIFT_FORWARD,
+                                        REL_OPTIONS_SHIFT2],
     "bigbenchhard": _OPTION_RELATIONS,
     "cruxeval": _CODE_RELATIONS,
     "humaneval": _CODE_RELATIONS,

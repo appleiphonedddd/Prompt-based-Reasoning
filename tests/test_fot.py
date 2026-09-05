@@ -20,6 +20,7 @@ Reference:
     "Falsification-of-Thought: Reasoning by Metamorphic Self-Refutation".
 """
 
+import datetime
 import math
 import re
 import unittest
@@ -255,6 +256,78 @@ class TestSvgRelations(unittest.TestCase):
         curve = ('This SVG path element <path d="M 1.00,2.00 C 5.00,5.00 7.00,7.00 '
                  '9.00,9.00"/> draws a')
         self.assertIsNone(rel.apply(curve, "(A)"))
+
+
+# ── 3b. Date relations ─────────────────────────────────────────────────────────
+class TestDateRelations(unittest.TestCase):
+
+    Q = ("In the UK, people usually put the day before the month when formatting "
+         "the date. Therefore, today is 02/01/1987 to them. What is the date a "
+         "month ago in MM/DD/YYYY?\n"
+         "Options:\n(A) 12/02/1986\n(B) 12/01/1986\n(C) 02/29/1988")
+
+    def _rel(self, name):
+        return _relation("bigbenchhard", name, "date_understanding")
+
+    def test_spelling_out_the_options_removes_the_mm_dd_ambiguity(self):
+        """The task's own templates trade on MM/DD ambiguity, so removing it helps."""
+        v = self._rel("dates_spell_out_options").apply(self.Q, "(A)")
+        self.assertIn("(A) December 2, 1986", v.question)
+        self.assertIn("(C) February 29, 1988", v.question)
+        self.assertNotIn("MM/DD/YYYY", v.question)
+        self.assertIn("today is 02/01/1987", v.question)   # the premise is untouched
+        self.assertTrue(v.holds("(A)", "(A)"))
+        self.assertFalse(v.holds("(A)", "(B)"))
+
+    def test_iso_rewrite_keeps_the_requested_format_in_step(self):
+        v = self._rel("dates_iso_options").apply(self.Q, "(A)")
+        self.assertIn("(A) 1986-12-02", v.question)
+        self.assertIn("in YYYY-MM-DD?", v.question)
+
+    def test_year_shift_moves_premise_and_options_together(self):
+        v = self._rel("dates_shift_years_back28").apply(self.Q, "(A)")
+        self.assertIn("today is 02/01/1959", v.question)
+        self.assertIn("(A) 12/02/1958", v.question)
+        self.assertIn("(C) 02/29/1960", v.question)        # leap day stays a leap day
+
+    def test_a_28_year_shift_preserves_the_weekday(self):
+        """28 years is 1461 whole weeks, which is why this shift is exact."""
+        for year in (1937, 1958, 1987, 2008):
+            with self.subTest(year=year):
+                self.assertEqual(datetime.date(year, 3, 1).weekday(),
+                                 datetime.date(year + 28, 3, 1).weekday())
+
+    def test_shift_is_refused_across_a_non_leap_century(self):
+        """1900 and 2100 break the 28-year cycle, so the relation withdraws."""
+        q = self.Q.replace("1987", "1885").replace("1986", "1885") \
+                  .replace("1988", "1885")
+        self.assertIsNone(self._rel("dates_shift_years_28").apply(q, "(A)"))
+
+    def test_a_rewrite_that_would_merge_two_options_is_refused(self):
+        """Collapsing two distinct options into one is no longer answer-preserving."""
+        from baseline.FoT.relations import _rewrite_option_bodies
+        q = ("Today is 01/02/1937. What is the date tomorrow in MM/DD/YYYY?\n"
+             "Options:\n(A) 01/03/1937\n(B) 01/04/1937")
+        self.assertIsNone(_rewrite_option_bodies(q, lambda body: "same day"))
+        self.assertIsNotNone(_rewrite_option_bodies(q, lambda body: body[::-1]))
+
+    def test_an_option_that_is_not_a_real_date_is_refused(self):
+        q = ("Today is 01/02/1937. What is the date tomorrow in MM/DD/YYYY?\n"
+             "Options:\n(A) 01/03/1937\n(B) 02/30/1937")
+        self.assertIsNone(self._rel("dates_spell_out_options").apply(q, "(A)"))
+
+    def test_non_date_options_make_the_relation_inapplicable(self):
+        q = "What shape is this?\nOptions:\n(A) circle\n(B) kite"
+        for name in ("dates_spell_out_options", "dates_iso_options"):
+            with self.subTest(relation=name):
+                self.assertIsNone(self._rel(name).apply(q, "(A)"))
+
+    def test_catalogue_leads_with_the_reliability_increasing_entries(self):
+        names = [r.name for r in get_catalogue("bigbenchhard", "date_understanding")]
+        self.assertEqual(names[:3], ["dates_spell_out_options",
+                                     "dates_shift_years_back28", "options_shift1"])
+        for relation in get_catalogue("bigbenchhard", "date_understanding"):
+            self.assertIn(relation.direction, ("symmetric", "increasing"))
 
 
 # ── 4. Word-problem relations ──────────────────────────────────────────────────
