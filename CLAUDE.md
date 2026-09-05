@@ -197,11 +197,13 @@ A `Relation` is `(T, ρ)`; the realised `Variant` carries `holds` (ρ, evaluated
 | Task | Catalogue (in draw order) |
 |------|---------------------------|
 | `mgsm` | `mask_quantity` (backward substitution — masks the k-th numeric literal on round k; `pullback is None`), `permute_premises`, `translate_to_english` (`pi_mr`, non-English only), `scale_quantities_x2/x3` (ρ: `a' = c·a`) |
-| `bigbenchhard:geometric_shapes` | `svg_rotate`, `svg_translate_scale`, `svg_reverse`, `options_shift1` |
+| `bigbenchhard:geometric_shapes` | `svg_canonicalise` (collapse the per-edge subpaths into the polyline they denote — the only strictly reliability-*increasing* entry, and composed into every other `svg_*` relation), `svg_reverse`, `svg_translate`, `svg_reflect`, `svg_rotate90`, `options_shift1`, `options_reverse` |
 | `bigbenchhard` (and default) | `options_shift1`, `options_reverse`, `options_shift2` — relabelling options is answer-transforming with a known `g⁻¹` |
 | code benchmarks | `rename_identifiers`, `insert_dead_code` (AST-based) |
 
 Model-instantiated transforms (`apply is None`) are **mechanically validated** after generation: the variant must carry exactly the numeric literals of the original (`preserve_numbers`), or it is discarded rather than solved.
+
+Only *exact* isometries of the dataset's 2-decimal coordinate grid are catalogued for `geometric_shapes`. A generic rotation (the old `svg_rotate`, 37°) and a non-integral rescale (the old `svg_translate_scale`, 1.5×) are valid relations but *decreasing* ones — they tilt an axis-aligned figure off axis and replace the grid with fresh decimals, so the variant is answered *less* reliably than the source and a disagreement indicts the variant rather than the candidate. Remark 2 excludes them, as it excludes distractor insertion. Paths are parsed into `(command, args)` segments rather than a flat coordinate list, so an arc translates by moving only its endpoint and rotates by turning its endpoint and adding to its x-axis rotation: the sector/ellipse queries (52 of 250), which previously had no applicable geometric relation at all, are now covered. Every one of the 250 questions has ≥ 4 applicable relations (was: 76 had exactly one, below τ, so FoT ≡ Solve on them).
 
 Two audit notes are recorded in the module docstring: `scale_quantities` is valid only when the answer is homogeneous of degree one in the scaled quantities — its guard is that both factors are catalogued, so where it fails the two pull-backs disagree, the orbit fragments and the majority rule blocks the repair — and `mask_quantity` is the one relation whose variant intentionally contains the candidate (that is what backward substitution *is*).
 

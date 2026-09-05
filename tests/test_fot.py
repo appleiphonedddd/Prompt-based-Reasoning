@@ -20,6 +20,7 @@ Reference:
     "Falsification-of-Thought: Reasoning by Metamorphic Self-Refutation".
 """
 
+import math
 import re
 import unittest
 from typing import List, Optional
@@ -175,35 +176,85 @@ class TestSvgRelations(unittest.TestCase):
         return [(float(x), float(y))
                 for x, y in re.findall(r"(-?\d+\.\d+),(-?\d+\.\d+)", d)]
 
-    def test_translate_scale_is_affine_and_answer_preserving(self):
-        rel = _relation("bigbenchhard", "svg_translate_scale", "geometric_shapes")
+    def _path(self, text: str) -> str:
+        return re.search(r'd="([^"]*)"', text).group(1)
+
+    def test_canonicalisation_collapses_the_per_edge_subpaths(self):
+        """The vertex count *is* the answer, so the redundant encoding is the enemy."""
+        rel = _relation("bigbenchhard", "svg_canonicalise", "geometric_shapes")
         variant = rel.apply(GEOMETRY_Q, "(C)")
-        self.assertEqual(self._coords(variant.question)[0], (28.00, 8.00))
+        self.assertEqual(self._path(variant.question),
+                         "M 10.00,10.00 L 20.00,10.00 L 20.00,20.00 L 10.00,10.00")
         self.assertTrue(variant.holds("(C)", "(C)"))
         self.assertFalse(variant.holds("(C)", "(B)"))
 
-    def test_rotation_preserves_pairwise_distances(self):
-        rel = _relation("bigbenchhard", "svg_rotate", "geometric_shapes")
-        before = self._coords(GEOMETRY_Q)
-        after = self._coords(rel.apply(GEOMETRY_Q, "(C)").question)
-        self.assertEqual(len(before), len(after))
-        for (ax, ay), (bx, by) in zip(before[:-1], before[1:]):
-            i = before.index((ax, ay))
-            j = before.index((bx, by))
-            d0 = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
-            d1 = ((after[i][0] - after[j][0]) ** 2
-                  + (after[i][1] - after[j][1]) ** 2) ** 0.5
-            self.assertAlmostEqual(d0, d1, delta=0.05)   # coordinates are 2-dp
+    def test_canonicalisation_is_skipped_when_it_is_a_no_op(self):
+        already = ('This SVG path element <path d="M 10.00,10.00 L 20.00,10.00 '
+                   'L 20.00,20.00"/> draws a\nOptions:\n(A) circle\n(B) line')
+        rel = _relation("bigbenchhard", "svg_canonicalise", "geometric_shapes")
+        self.assertIsNone(rel.apply(already, "(B)"))
+
+    def test_translate_is_exact_on_the_two_decimal_grid(self):
+        rel = _relation("bigbenchhard", "svg_translate", "geometric_shapes")
+        self.assertEqual(self._coords(rel.apply(GEOMETRY_Q, "(C)").question)[0],
+                         (15.00, 15.00))
+
+    def test_isometries_preserve_every_pairwise_distance(self):
+        """Remark 2: only exact isometries of the grid are catalogued."""
+        for name in ("svg_reflect", "svg_rotate90", "svg_translate"):
+            with self.subTest(relation=name):
+                rel = _relation("bigbenchhard", name, "geometric_shapes")
+                src = self._coords(_relation("bigbenchhard", "svg_canonicalise",
+                                             "geometric_shapes")
+                                   .apply(GEOMETRY_Q, "(C)").question)
+                dst = self._coords(rel.apply(GEOMETRY_Q, "(C)").question)
+                self.assertEqual(len(src), len(dst))
+                for i in range(len(src)):
+                    for j in range(i + 1, len(src)):
+                        d0 = math.dist(src[i], src[j])
+                        d1 = math.dist(dst[i], dst[j])
+                        self.assertAlmostEqual(d0, d1, places=6)
+
+    def test_isometries_stay_inside_the_datasets_own_frame(self):
+        """A variant that leaves the 0-100 frame is out of distribution, not neutral."""
+        tall = ('This SVG path element <path d="M 5.00,2.00 L 8.00,95.00 '
+                'L 11.00,2.00 L 5.00,2.00"/> draws a\nOptions:\n(A) triangle\n(B) line')
+        for name in ("svg_translate", "svg_rotate90"):
+            with self.subTest(relation=name):
+                rel = _relation("bigbenchhard", name, "geometric_shapes")
+                pts = self._coords(rel.apply(tall, "(A)").question)
+                self.assertTrue(all(0 <= x <= 100 and 0 <= y <= 100 for x, y in pts),
+                                pts)
 
     def test_reverse_emits_the_walk_backwards(self):
         rel = _relation("bigbenchhard", "svg_reverse", "geometric_shapes")
         pts = self._coords(rel.apply(GEOMETRY_Q, "(C)").question)
         self.assertEqual(pts, [(10.0, 10.0), (20.0, 20.0), (20.0, 10.0), (10.0, 10.0)])
 
+    def test_arcs_are_transformed_not_skipped(self):
+        """Sector/ellipse queries are the arc-bearing ones: they need coverage too."""
+        arc = ('This SVG path element <path d="M 10.00,20.00 A 5.00,5.00 30.00 1,0 '
+               '30.00,40.00"/> draws a\nOptions:\n(A) ellipse\n(B) line')
+        moved = _relation("bigbenchhard", "svg_translate",
+                          "geometric_shapes").apply(arc, "(A)")
+        self.assertIn("A 5.00,5.00 30.00 1,0 35.00,45.00", moved.question)
+        turned = _relation("bigbenchhard", "svg_rotate90",
+                           "geometric_shapes").apply(arc, "(A)")
+        self.assertIn("A 5.00,5.00 120.00 1,0", turned.question)
+
+    def test_reversal_and_mirroring_skip_arcs_rather_than_corrupt_them(self):
+        arc = ('This SVG path element <path d="M 10.00,20.00 A 5.00,5.00 30.00 1,0 '
+               '30.00,40.00"/> draws a\nOptions:\n(A) ellipse\n(B) line')
+        for name in ("svg_reverse", "svg_reflect"):
+            with self.subTest(relation=name):
+                self.assertIsNone(_relation("bigbenchhard", name,
+                                            "geometric_shapes").apply(arc, "(A)"))
+
     def test_curved_paths_are_skipped_not_corrupted(self):
-        rel = _relation("bigbenchhard", "svg_rotate", "geometric_shapes")
-        arc = 'This SVG path element <path d="M 1.00,2.00 A 5.00,5.00 0 0 1 9.00,9.00"/> draws a'
-        self.assertIsNone(rel.apply(arc, "(A)"))
+        rel = _relation("bigbenchhard", "svg_translate", "geometric_shapes")
+        curve = ('This SVG path element <path d="M 1.00,2.00 C 5.00,5.00 7.00,7.00 '
+                 '9.00,9.00"/> draws a')
+        self.assertIsNone(rel.apply(curve, "(A)"))
 
 
 # ── 4. Word-problem relations ──────────────────────────────────────────────────
@@ -297,8 +348,8 @@ class TestCatalogue(unittest.TestCase):
 
     def test_lookup_is_most_specific_first(self):
         names = [r.name for r in get_catalogue("bigbenchhard", "geometric_shapes")]
-        self.assertIn("svg_rotate", names)
-        self.assertNotIn("svg_rotate",
+        self.assertIn("svg_canonicalise", names)
+        self.assertNotIn("svg_canonicalise",
                          [r.name for r in get_catalogue("bigbenchhard", "snarks")])
 
     def test_unknown_benchmark_falls_back_to_option_relations(self):
@@ -317,7 +368,8 @@ class TestCatalogue(unittest.TestCase):
 
     def test_every_relation_is_non_decreasing_in_reliability(self):
         """Remark 2: a relation whose image is answered less reliably is excluded."""
-        for task in ("mgsm", "bigbenchhard", "cruxeval"):
+        for task in ("mgsm", "bigbenchhard", "bigbenchhard:geometric_shapes",
+                     "cruxeval"):
             for relation in get_catalogue(task):
                 self.assertIn(relation.direction, ("symmetric", "increasing"))
 

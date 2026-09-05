@@ -47,6 +47,19 @@ Audit notes on the entries below:
     not hold the orbit fragments, no answer takes the majority and Remark 3's
     acceptance rule blocks the repair. Drop it entirely with ``--fot_relations``
     if a stricter catalogue is wanted.
+  * The ``svg_*`` entries (geometric_shapes) are all answer-preserving, and all
+    of them canonicalise the path first — the BBH generator emits one subpath per
+    edge, so the encoding repeats every interior vertex and the vertex count,
+    which *is* the answer, cannot be read off. Collapsing that is answer-
+    preserving and strictly easier, which is why it leads the catalogue and is
+    composed into the others. What was removed on Remark 2 grounds is the
+    generic rotation (37 degrees) and the non-integral rescale (1.5x) the
+    catalogue used to open with: both are valid relations but *decreasing* ones,
+    since they tilt an axis-aligned figure off axis and replace the dataset's
+    2-decimal grid with fresh decimals, so their variants are answered less
+    reliably than the source and a disagreement indicts the variant. Only exact
+    isometries of the grid are kept (integer translation, mirror about the
+    bounding box mid-line, quarter turn).
   * ``mask_quantity`` is the backward-verification entry of §2.6: masking a
     quantity and requiring the candidate answer to recover it is an
     answer-transforming relation whose follow-up question is written by a fixed
@@ -241,119 +254,326 @@ def equality_variant(relation: Relation, question: str,
 
 
 # ── SVG path relations (BBH geometric_shapes) ──────────────────────────────────
+#
+# The answer to a geometric_shapes query is a combinatorial property of the
+# path's vertex walk (how many distinct vertices, and their metric arrangement
+# for kite/trapezoid/rectangle). Two consequences shape this block:
+#
+#   * The BBH encoding is *redundant*: the generator emits one subpath per edge,
+#     "M v1 L v2 M v2 L v3 M v3 L v4 ...", so a hexagon is written as eleven
+#     coordinate pairs. Collapsing that into the single polyline it denotes is
+#     answer-preserving (the drawing is identical) and strictly easier to read —
+#     it is the one transformation here that is genuinely *increasing* in
+#     reliability, so it leads the catalogue and is composed into every other
+#     entry (the composite stays valid because canonicalisation is itself a
+#     valid answer-preserving relation).
+#   * Every other transformation must be an *exact* isometry on the 2-decimal
+#     coordinate grid. A generic rotation or a non-integral rescale is a valid
+#     relation but a *decreasing* one: it tilts an axis-aligned rectangle and
+#     litters the path with fresh decimals, so the variant is answered less
+#     reliably than the source and a disagreement indicts the variant rather
+#     than the candidate. Remark 2 excludes it, exactly as it excludes distractor
+#     insertion. The isometries kept below (integer translation, mirror about the
+#     bounding box's vertical mid-line, quarter-turn about the bounding box
+#     centre) land back on the same grid and preserve axis-alignment.
+#
+# Composing canonicalisation into every entry makes the drawn relations partly
+# correlated, which is deliberate rather than an oversight: Remark 3's majority
+# rule then reads "the canonical form's verdict outvotes the redundant encoding's",
+# which is precisely the reliability ordering Remark 2 asks the catalogue to
+# encode. Where the query is already canonical (141 of the 250 questions carry no
+# redundant subpath) the entries reduce to independent isometries and the rule
+# reverts to ordinary corroboration.
+#
+# Paths are parsed into (command, args) segments rather than a flat coordinate
+# list, so arcs are transformed correctly instead of being skipped: "A rx,ry phi
+# fa,fs x,y" translates by moving only its endpoint, and rotates by turning its
+# endpoint and adding to phi. That matters for coverage — the sector and ellipse
+# questions (52 of 250) are exactly the arc-bearing ones, and under a
+# coordinate-list parser they had no geometric relation at all.
 
 _PATH_RE = re.compile(r'd\s*=\s*"([^"]*)"')
-_POINT_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)")
+_TOKEN_RE = re.compile(r"[A-Za-z]|-?\d+(?:\.\d+)?")
+_ARGC = {"M": 2, "L": 2, "A": 7}
+
+Segment = Tuple[str, List[float]]
 
 
-def _path_points(question: str) -> Optional[Tuple[str, List[Tuple[float, float]]]]:
-    """Return the raw ``d`` attribute and its coordinates, for M/L-only paths.
+def _parse_path(question: str) -> Optional[Tuple[str, List[Segment]]]:
+    """Return the raw ``d`` attribute and its segments, for M/L/A paths.
 
-    Anything containing a curve or arc command is rejected: an affine map on the
-    raw numbers would corrupt an arc's radii/flags, which would make the relation
-    invalid rather than merely inapplicable.
+    Anything else — a curve, a close-path, a relative command — makes the whole
+    relation inapplicable rather than misapplied: an affine map on the raw
+    numbers would corrupt a cubic's control points or an arc's radii, which
+    would make the relation invalid instead of merely unavailable.
     """
     m = _PATH_RE.search(question)
     if not m:
         return None
     d = m.group(1)
-    if re.search(r"[A-Za-z]", re.sub(r"[MLml]", "", d)):
+    tokens = _TOKEN_RE.findall(d)
+    if "".join(tokens) != re.sub(r"[\s,]", "", d):
+        return None                       # something in d we did not tokenise
+    segments: List[Segment] = []
+    cmd: Optional[str] = None
+    i = 0
+    while i < len(tokens):
+        if tokens[i].isalpha():
+            cmd = tokens[i]
+            i += 1
+        if cmd not in _ARGC:              # unsupported or leading numbers
+            return None
+        n = _ARGC[cmd]
+        args = tokens[i:i + n]
+        if len(args) < n or any(a.isalpha() for a in args):
+            return None
+        segments.append((cmd, [float(a) for a in args]))
+        i += n
+        if cmd == "M":
+            cmd = "L"                     # SVG: numbers after a moveto are linetos
+    return (d, segments) if segments else None
+
+
+def _fmt_coord(value: float) -> str:
+    """2 decimals, as the dataset writes them — and never a signed zero."""
+    return f"{0.0 if abs(value) < 5e-3 else value:.2f}"
+
+
+def _emit_path(segments: List[Segment]) -> str:
+    """Render segments back in the dataset's own notation."""
+    out: List[str] = []
+    for cmd, a in segments:
+        if cmd == "A":
+            out.append(f"A {_fmt_coord(a[0])},{_fmt_coord(a[1])} {_fmt_coord(a[2])} "
+                       f"{int(a[3])},{int(a[4])} {_fmt_coord(a[5])},{_fmt_coord(a[6])}")
+        else:
+            out.append(f"{cmd} {_fmt_coord(a[0])},{_fmt_coord(a[1])}")
+    return " ".join(out)
+
+
+def _seg_endpoint(segment: Segment) -> Tuple[float, float]:
+    cmd, a = segment
+    return (a[5], a[6]) if cmd == "A" else (a[0], a[1])
+
+
+def _same_point(p: Tuple[float, float], q: Tuple[float, float]) -> bool:
+    return abs(p[0] - q[0]) < 5e-3 and abs(p[1] - q[1]) < 5e-3
+
+
+def _canonicalise(segments: List[Segment]) -> List[Segment]:
+    """Collapse the per-edge subpaths into the single walk they denote.
+
+    Drops a ``M p`` whose target is where the pen already is, and a zero-length
+    ``L``. Both are no-ops for the rendered figure, so the transformation is
+    answer-preserving; what it removes is the duplicated coordinate that makes
+    the vertex count hard to read off.
+    """
+    out: List[Segment] = []
+    cur: Optional[Tuple[float, float]] = None
+    for cmd, a in segments:
+        point = _seg_endpoint((cmd, a))
+        if cmd in ("M", "L") and cur is not None and _same_point(cur, point):
+            continue
+        out.append((cmd, list(a)))
+        cur = point
+    return out
+
+
+def _has_arc(segments: List[Segment]) -> bool:
+    return any(cmd == "A" for cmd, _ in segments)
+
+
+def _bbox(segments: List[Segment]) -> Tuple[float, float, float, float]:
+    xs = [_seg_endpoint(s)[0] for s in segments]
+    ys = [_seg_endpoint(s)[1] for s in segments]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _bbox_centre(segments: List[Segment]) -> Tuple[float, float]:
+    """Centre of the endpoint bounding box, snapped to the 2-decimal grid.
+
+    Snapping keeps every rotated coordinate on the same grid the dataset uses,
+    so the quarter-turn is exact rather than a rounding of an exact map.
+    """
+    lo_x, lo_y, hi_x, hi_y = _bbox(segments)
+    return (round((lo_x + hi_x) / 2, 2), round((lo_y + hi_y) / 2, 2))
+
+
+def _in_frame_offset(lo: float, hi: float, step: float = 5.0,
+                     frame: float = 100.0) -> float:
+    """A +/-``step`` shift that keeps ``[lo, hi]`` inside ``[0, frame]``, else 0."""
+    if hi + step <= frame:
+        return step
+    if lo - step >= 0.0:
+        return -step
+    return 0.0
+
+
+def _reanchor(target_lo: float, lo: float, hi: float,
+              frame: float = 100.0) -> float:
+    """Shift ``[lo, hi]`` back towards ``target_lo`` without leaving ``[0, frame]``."""
+    placed = min(max(target_lo, 0.0), max(0.0, frame - (hi - lo)))
+    return round(placed - lo, 2)
+
+
+def _map_segments(segments: List[Segment],
+                  point: Callable[[float, float], Tuple[float, float]],
+                  phi: float = 0.0) -> List[Segment]:
+    """Apply an isometry to every endpoint; ``phi`` is added to arc rotations."""
+    out: List[Segment] = []
+    for cmd, a in segments:
+        if cmd == "A":
+            x, y = point(a[5], a[6])
+            out.append(("A", [a[0], a[1], (a[2] + phi) % 360.0, a[3], a[4], x, y]))
+        else:
+            out.append((cmd, list(point(a[0], a[1]))))
+    return out
+
+
+def _svg_variant(relation: Relation, question: str, d: str,
+                 segments: List[Segment]) -> Optional[Variant]:
+    """Wrap rewritten segments as an answer-preserving variant, or skip a no-op."""
+    new_d = _emit_path(segments)
+    if new_d == d.strip():
         return None
-    pts = [(float(x), float(y)) for x, y in _POINT_RE.findall(d)]
-    return (d, pts) if len(pts) >= 3 else None
+    return equality_variant(relation, question.replace(f'd="{d}"', f'd="{new_d}"', 1),
+                            source="programmatic")
 
 
-def _rewrite_path(question: str, d: str, new_pts: List[Tuple[float, float]]) -> str:
-    """Substitute new coordinates into the path, keeping the command skeleton."""
-    it = iter(new_pts)
-
-    def _sub(m: re.Match) -> str:
-        x, y = next(it)
-        return f"{x:.2f},{y:.2f}"
-
-    return question.replace(f'd="{d}"', f'd="{_POINT_RE.sub(_sub, d)}"', 1)
-
-
-def _svg_affine(relation: Relation, question: str,
-                fn: Callable[[float, float], Tuple[float, float]]) -> Optional[Variant]:
-    parsed = _path_points(question)
+def _apply_canonicalise(question: str, candidate: str = "",
+                        index: int = 0) -> Optional[Variant]:
+    parsed = _parse_path(question)
     if parsed is None:
         return None
-    d, pts = parsed
-    return equality_variant(
-        relation, _rewrite_path(question, d, [fn(x, y) for x, y in pts]),
-        source="programmatic")
-
-
-def _apply_translate_scale(question: str, candidate: str = "",
-                           index: int = 0) -> Optional[Variant]:
-    return _svg_affine(REL_SVG_TRANSLATE_SCALE, question,
-                       lambda x, y: (1.5 * x + 13.0, 1.5 * y - 7.0))
-
-
-def _apply_rotate(question: str, candidate: str = "",
-                  index: int = 0) -> Optional[Variant]:
-    parsed = _path_points(question)
-    if parsed is None:
-        return None
-    _, pts = parsed
-    cx = sum(x for x, _ in pts) / len(pts)
-    cy = sum(y for _, y in pts) / len(pts)
-    th = math.radians(37.0)
-    cos_t, sin_t = math.cos(th), math.sin(th)
-
-    def _rot(x: float, y: float) -> Tuple[float, float]:
-        dx, dy = x - cx, y - cy
-        return (cx + dx * cos_t - dy * sin_t, cy + dx * sin_t + dy * cos_t)
-
-    return _svg_affine(REL_SVG_ROTATE, question, _rot)
+    d, segments = parsed
+    return _svg_variant(REL_SVG_CANONICALISE, question, d, _canonicalise(segments))
 
 
 def _apply_reverse(question: str, candidate: str = "",
                    index: int = 0) -> Optional[Variant]:
     """Reverse the traversal order of the vertices.
 
-    The path is first canonicalised into a single ``M v1 L v2 ...`` polyline (BBH
-    paths repeat ``M`` per segment), then emitted in reverse. Canonicalisation is
-    itself answer-preserving, so the composite relation stays valid.
+    Restricted to arc-free paths: reversing an arc also requires flipping its
+    sweep flag, and a relation that is only nearly right is worse than one that
+    is unavailable.
     """
-    parsed = _path_points(question)
+    parsed = _parse_path(question)
     if parsed is None:
         return None
-    d, pts = parsed
-    walk: List[Tuple[float, float]] = []
-    for p in pts:
-        if not walk or walk[-1] != p:
-            walk.append(p)
-    if len(walk) < 3:
+    d, segments = parsed
+    walk = _canonicalise(segments)
+    if _has_arc(walk) or len(walk) < 3:
         return None
-    rev = list(reversed(walk))
-    new_d = "M " + " L ".join(f"{x:.2f},{y:.2f}" for x, y in rev)
-    return equality_variant(
-        REL_SVG_REVERSE, question.replace(f'd="{d}"', f'd="{new_d}"', 1),
-        source="programmatic")
+    points = [_seg_endpoint(s) for s in walk][::-1]
+    rev: List[Segment] = [("M", list(points[0]))]
+    rev += [("L", list(p)) for p in points[1:]]
+    return _svg_variant(REL_SVG_REVERSE, question, d, rev)
 
 
-REL_SVG_TRANSLATE_SCALE = Relation(
-    name="svg_translate_scale",
-    transformation="translate and uniformly scale every control point of the path",
-    direction="symmetric",
-    relation_text="the shape is unchanged, so the answer must be identical",
-    apply=_apply_translate_scale,
-)
-REL_SVG_ROTATE = Relation(
-    name="svg_rotate",
-    transformation="rotate every control point of the path by 37 degrees about its centroid",
-    direction="symmetric",
-    relation_text="the shape is unchanged, so the answer must be identical",
-    apply=_apply_rotate,
+def _apply_translate(question: str, candidate: str = "",
+                     index: int = 0) -> Optional[Variant]:
+    """Translate by an integer offset — exact on the 2-decimal grid, arcs included.
+
+    The offset is flipped where it would push the figure out of the dataset's own
+    0-100 frame: an isometry is only reliability-neutral if its image still looks
+    like a query from this task.
+    """
+    parsed = _parse_path(question)
+    if parsed is None:
+        return None
+    d, segments = parsed
+    walk = _canonicalise(segments)
+    lo_x, lo_y, hi_x, hi_y = _bbox(walk)
+    dx, dy = _in_frame_offset(lo_x, hi_x), _in_frame_offset(lo_y, hi_y)
+    if dx == 0.0 and dy == 0.0:
+        return None
+    return _svg_variant(REL_SVG_TRANSLATE, question, d,
+                        _map_segments(walk, lambda x, y: (x + dx, y + dy)))
+
+
+def _apply_reflect(question: str, candidate: str = "",
+                   index: int = 0) -> Optional[Variant]:
+    """Mirror about the bounding box's vertical mid-line.
+
+    Every shape class in this task's option lists is closed under reflection, so
+    rho is equality. Arc-free only: a mirrored elliptical arc also needs its
+    sweep flag flipped and its x-axis rotation negated.
+    """
+    parsed = _parse_path(question)
+    if parsed is None:
+        return None
+    d, segments = parsed
+    walk = _canonicalise(segments)
+    if _has_arc(walk) or len(walk) < 2:
+        return None
+    axis = _bbox_centre(walk)[0]
+    return _svg_variant(REL_SVG_REFLECT, question, d,
+                        _map_segments(walk, lambda x, y: (2 * axis - x, y)))
+
+
+def _apply_rotate90(question: str, candidate: str = "",
+                    index: int = 0) -> Optional[Variant]:
+    """Quarter-turn about the bounding box centre.
+
+    A quarter-turn is the one rotation that keeps the path on the coordinate
+    grid *and* keeps an axis-aligned figure axis-aligned, so it costs the reader
+    nothing — unlike the generic rotation Remark 2 rules out.
+    """
+    parsed = _parse_path(question)
+    if parsed is None:
+        return None
+    d, segments = parsed
+    walk = _canonicalise(segments)
+    cx, cy = _bbox_centre(walk)
+    turned = _map_segments(walk, lambda x, y: (cx - (y - cy), cy + (x - cx)),
+                           phi=90.0)
+    # Re-anchor the bounding box inside the frame: a quarter turn makes a wide
+    # figure tall, which walks off the top. The correcting translation is exact
+    # on the grid (both corners are), so the composite is still an isometry.
+    lo_x, lo_y, _, _ = _bbox(walk)
+    new_lo_x, new_lo_y, new_hi_x, new_hi_y = _bbox(turned)
+    shift_x = _reanchor(lo_x, new_lo_x, new_hi_x)
+    shift_y = _reanchor(lo_y, new_lo_y, new_hi_y)
+    turned = _map_segments(turned, lambda x, y: (x + shift_x, y + shift_y))
+    return _svg_variant(REL_SVG_ROTATE90, question, d, turned)
+
+
+_SHAPE_UNCHANGED = "the figure is unchanged, so the answer must be identical"
+
+REL_SVG_CANONICALISE = Relation(
+    name="svg_canonicalise",
+    transformation="rewrite the per-edge subpaths as the single polyline they denote",
+    direction="increasing",
+    relation_text=_SHAPE_UNCHANGED,
+    apply=_apply_canonicalise,
 )
 REL_SVG_REVERSE = Relation(
     name="svg_reverse",
     transformation="reverse the order in which the vertices of the path are traversed",
-    direction="symmetric",
-    relation_text="the shape is unchanged, so the answer must be identical",
+    direction="increasing",
+    relation_text=_SHAPE_UNCHANGED,
     apply=_apply_reverse,
+)
+REL_SVG_TRANSLATE = Relation(
+    name="svg_translate",
+    transformation="translate every point of the path by a fixed integer offset",
+    direction="symmetric",
+    relation_text=_SHAPE_UNCHANGED,
+    apply=_apply_translate,
+)
+REL_SVG_REFLECT = Relation(
+    name="svg_reflect",
+    transformation="mirror the path about the vertical mid-line of its bounding box",
+    direction="symmetric",
+    relation_text=_SHAPE_UNCHANGED,
+    apply=_apply_reflect,
+)
+REL_SVG_ROTATE90 = Relation(
+    name="svg_rotate90",
+    transformation="rotate the path by a quarter turn about the centre of its bounding box",
+    direction="symmetric",
+    relation_text=_SHAPE_UNCHANGED,
+    apply=_apply_rotate90,
 )
 
 
@@ -762,8 +982,13 @@ _OPTION_RELATIONS = [REL_OPTIONS_SHIFT1, REL_OPTIONS_REVERSE, REL_OPTIONS_SHIFT2
 CATALOGUES: Dict[str, List[Relation]] = {
     "mgsm": [REL_MASK, REL_PERMUTE_PREMISES, REL_TRANSLATE_EN,
              REL_SCALE_X2, REL_SCALE_X3],
-    "bigbenchhard:geometric_shapes": [REL_SVG_ROTATE, REL_SVG_TRANSLATE_SCALE,
-                                      REL_SVG_REVERSE, REL_OPTIONS_SHIFT1],
+    # Canonicalisation first (the only strictly reliability-increasing entry),
+    # then the exact isometries, then option relabelling — which is all that
+    # remains applicable to the arc-bearing sector/ellipse queries.
+    "bigbenchhard:geometric_shapes": [REL_SVG_CANONICALISE, REL_SVG_REVERSE,
+                                      REL_SVG_TRANSLATE, REL_SVG_REFLECT,
+                                      REL_SVG_ROTATE90, REL_OPTIONS_SHIFT1,
+                                      REL_OPTIONS_REVERSE],
     "bigbenchhard": _OPTION_RELATIONS,
     "cruxeval": _CODE_RELATIONS,
     "humaneval": _CODE_RELATIONS,
