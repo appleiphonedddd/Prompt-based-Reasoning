@@ -34,8 +34,11 @@ from baseline.FoT.checkers import (
     get_checker,
     has_checker,
     multistep_arithmetic_checker,
+    sonnet_checker,
 )
-from baseline.FoT.fot import _majority_keys, _parse_probe, _parse_variant
+from baseline.FoT.fot import (_extract_answer, _majority_keys, _parse_probe,
+                              _parse_variant)
+from baseline.basebaseline import is_generative_task
 from baseline.FoT.relations import (
     answer_key,
     answers_equal,
@@ -328,6 +331,94 @@ class TestDateRelations(unittest.TestCase):
                                      "dates_shift_years_back28", "options_shift1"])
         for relation in get_catalogue("bigbenchhard", "date_understanding"):
             self.assertIn(relation.direction, ("symmetric", "increasing"))
+
+
+# ── 3c. Sonnet writing: the executable regime ──────────────────────────────────
+class TestSonnetChecker(unittest.TestCase):
+    """c_q reads its constraints off the prompt, the way checkmate replays its PGN."""
+
+    Q = ('Write a sonnet with strict rhyme scheme ABAB CDCD EFEF GG, containing '
+         'each of the following words verbatim: "grass", "value", and "jail".')
+
+    def _poem(self, ends, words=("grass", "value", "jail")):
+        lines = []
+        for k, end in enumerate(ends):
+            word = words[k] if k < len(words) else "the"
+            lines.append(f"A line with {word} that ends in st{end}")
+        return "\n".join(lines)
+
+    GOOD = ("ay", "ight", "ay", "ight", "ee", "old", "ee", "old",
+            "ine", "ate", "ine", "ate", "all", "all")
+
+    def test_sonnetwriting_is_in_the_executable_regime(self):
+        self.assertTrue(has_checker("sonnetwriting"))
+        self.assertIs(get_checker("sonnetwriting"), sonnet_checker)
+
+    def test_a_conforming_sonnet_passes(self):
+        r = sonnet_checker(self.Q, self._poem(self.GOOD))
+        self.assertEqual(r.verdict, "pass")
+
+    def test_a_broken_rhyme_pair_is_named_concretely(self):
+        ends = list(self.GOOD); ends[2] = "zzz"
+        r = sonnet_checker(self.Q, self._poem(ends))
+        self.assertEqual(r.verdict, "fail")
+        self.assertIn("line 1 and line 3", r.detail)
+        self.assertIn("stzzz", r.detail)
+
+    def test_the_line_count_is_checked_before_the_rhymes(self):
+        """A poem of the wrong length has to be resized before its rhymes mean anything."""
+        r = sonnet_checker(self.Q, self._poem(self.GOOD[:12]))
+        self.assertEqual(r.verdict, "fail")
+        self.assertIn("12 non-empty lines", r.detail)
+
+    def test_a_missing_required_word_is_named(self):
+        r = sonnet_checker(self.Q, self._poem(self.GOOD, words=("grass", "value", "x")))
+        self.assertEqual(r.verdict, "fail")
+        self.assertIn("'jail'", r.detail)
+
+    def test_blank_lines_between_stanzas_do_not_count_as_verse_lines(self):
+        stanzas = self._poem(self.GOOD).split("\n")
+        spaced = "\n\n".join("\n".join(stanzas[i:i + 4]) for i in range(0, 14, 4))
+        self.assertEqual(sonnet_checker(self.Q, spaced).verdict, "pass")
+
+    def test_a_prompt_without_constraints_is_undecided_not_failed(self):
+        r = sonnet_checker("Write something nice.", self._poem(self.GOOD))
+        self.assertEqual(r.verdict, "undecided")
+
+    def test_the_verdict_matches_the_benchmarks_own_grade(self):
+        """Decisive, not merely sound: c_q fails exactly what the grader rejects."""
+        from benchmark.SonnetWriting.sonnetwriting import SonnetWriting
+        ds = SonnetWriting()
+        target = "ABAB CDCD EFEF GG, grass value jail"
+        ends = list(self.GOOD); ends[5] = "qqq"
+        for poem in (self._poem(self.GOOD), self._poem(ends),
+                     self._poem(self.GOOD[:13]), "not a poem"):
+            with self.subTest(poem=poem[:24]):
+                graded = ds.evaluate_answer(poem, target).is_correct
+                passed = sonnet_checker(self.Q, poem).verdict == "pass"
+                self.assertEqual(passed, graded)
+
+
+# ── 3d. Generative answers are not truncated ───────────────────────────────────
+class TestGenerativeExtraction(unittest.TestCase):
+
+    SONNET = "\n\n".join("\n".join(f"line {4 * s + k}" for k in range(4))
+                          for s in range(3)) + "\nline 12\nline 13"
+
+    def test_a_stanza_break_no_longer_truncates_the_answer(self):
+        text = f"Here is my reasoning.\n\nANSWER:\n{self.SONNET}"
+        short = _extract_answer(text)
+        full = _extract_answer(text, generative=True)
+        self.assertEqual(len([l for l in short.splitlines() if l.strip()]), 4)
+        self.assertEqual(len([l for l in full.splitlines() if l.strip()]), 14)
+
+    def test_short_answer_tasks_keep_the_first_block(self):
+        text = "ANSWER: (B)\n\nBecause the shape has seven sides."
+        self.assertEqual(_extract_answer(text), "(B)")
+
+    def test_the_sonnet_task_is_detected_as_generative(self):
+        self.assertTrue(is_generative_task("Write a Shakespearean sonnet", ""))
+        self.assertFalse(is_generative_task("Answer with the option letter", "Today is..."))
 
 
 # ── 4. Word-problem relations ──────────────────────────────────────────────────

@@ -15,7 +15,8 @@ Author: Egor Morozov
 import re
 from typing import Optional
 
-from baseline.basebaseline import BaseBaseline, BaselineResponse
+from baseline.basebaseline import (BaseBaseline, BaselineResponse,
+                                   is_generative_task)
 from models.base import BaseLLM
 
 
@@ -185,24 +186,7 @@ class ZeroShotCoT(BaseBaseline):
             # - Expression-based tasks (Game of 24): expect arithmetic expressions
             # - Creative/generative tasks (SonnetWriting): the poem is the answer
             # - Code generation tasks (HumanEval, MBPP, ClassEval): code is the answer
-            instruction_lower = instruction.lower() if instruction else ""
-            question_lower = question.lower() if question else ""
-            is_generative_task = (
-                "expression" in instruction_lower or
-                "equation" in instruction_lower or
-                "formula" in instruction_lower or
-                "sonnet" in instruction_lower or
-                "sonnet" in question_lower or
-                "poem" in instruction_lower or
-                ("write" in instruction_lower and "line" in instruction_lower) or
-                "function body" in instruction_lower or
-                "function implementation" in instruction_lower or
-                ("implement" in instruction_lower and "function" in instruction_lower) or
-                ("implement" in instruction_lower and "class" in instruction_lower) or
-                "class implementation" in instruction_lower or
-                "class body" in instruction_lower
-            )
-            extract_answer = not is_generative_task
+            extract_answer = not is_generative_task(instruction, question)
 
         # Stage 1: Generate reasoning
         reasoning_prompt = self.build_reasoning_prompt(

@@ -49,7 +49,7 @@ import ast
 import operator
 import re
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 # Reuse BoT's hardened, timeout-bounded subprocess executor to run the *reference*
 # code embedded in the problem (CRUXEval functions, Python-Puzzles ``sat``). The
@@ -60,6 +60,11 @@ from baseline.BoT.bot import run_code
 # The checkmate checker resolves the candidate with the benchmark's own move
 # extractor, so the move the verifier plays is the move the grader will score.
 from benchmark.Checkmate.checkmate import extract_move
+
+# The sonnet checker re-runs the benchmark's own three constraints, so the
+# verdict it issues is the verdict the grader will issue.
+from benchmark.SonnetWriting.sonnetwriting import (
+    _get_last_word, _rhyme_pairs, _scheme_length, _words_rhyme)
 
 
 @dataclass
@@ -420,6 +425,104 @@ def checkmate_checker(
     )
 
 
+# ── Sonnet writing ──────────────────────────────────────────────────────────────
+
+# The two gradeable constraints are stated in the prompt itself — the rhyme
+# scheme and the required words — so the checker reads them off the question the
+# way the checkmate checker replays the question's own movetext. Nothing is taken
+# from the dataset's target, and nothing needs to be withheld from the repair:
+# unlike checkmate, where the failure detail must not name the mating move, here
+# the constraints are public and a concrete violation ("line 3 ends in 'sky',
+# which does not rhyme with line 1's 'grass'") leaks nothing the prompt did not
+# already say.
+#
+# The verdict is computed with the benchmark's own grading primitives, so this
+# checker is not merely sound but *decisive*: it fails exactly the sonnets the
+# benchmark would mark incorrect.
+
+_SCHEME_RE = re.compile(r"rhyme scheme\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)\s*,", re.IGNORECASE)
+_QUOTED_WORD_RE = re.compile(r"[\"“]([^\"“”]+)[\"”]")
+
+
+def _sonnet_constraints(question: str) -> Optional[Tuple[str, List[str]]]:
+    """Read the rhyme scheme and the required words out of the prompt itself."""
+    scheme_match = _SCHEME_RE.search(question)
+    words = [w.strip() for w in _QUOTED_WORD_RE.findall(question) if w.strip()]
+    if scheme_match is None or not words:
+        return None
+    scheme = scheme_match.group(1).strip().upper()
+    return (scheme, words) if _scheme_length(scheme) else None
+
+
+def _sonnet_lines(candidate: str, expected: int) -> List[str]:
+    """The lines the grader will score: non-empty, truncated to the scheme length."""
+    lines = [ln.strip() for ln in candidate.split("\n") if ln.strip()]
+    return lines[:expected] if len(lines) > expected else lines
+
+
+def sonnet_checker(
+    question: str, candidate: str, probe: str = "", *, timeout: float = 10.0
+) -> CheckResult:
+    """c_q for sonnet writing: re-run the benchmark's own three constraints.
+
+    Sound *and* decisive: word inclusion, line count and the rhyme scheme are
+    mechanical predicates, computed here with the benchmark's own helpers
+    (``_rhyme_pairs``, ``_get_last_word``, ``_words_rhyme``), so a sonnet the
+    grader would accept is never refuted and one it would reject never passes.
+
+    ``timeout`` is accepted for interface conformance and unused — the check is
+    pure string work with no subprocess to bound.
+
+    The detail names *one* violation at a time, most structural first: a poem
+    with the wrong number of lines has to be resized before its rhymes mean
+    anything. Repairing against one concrete defect works better than against a
+    list, and the remaining defects surface on the next round.
+    """
+    constraints = _sonnet_constraints(question)
+    if constraints is None:
+        return CheckResult("undecided",
+                           "the prompt states no rhyme scheme and quoted words")
+    scheme, required = constraints
+    expected = _scheme_length(scheme)
+    lines = _sonnet_lines(candidate, expected)
+
+    if len(lines) != expected:
+        return CheckResult(
+            "fail",
+            f"the poem has {len(lines)} non-empty lines but the scheme {scheme} "
+            f"prescribes {expected}"
+            + (" (blank lines between stanzas are fine; it is the count of "
+               "verse lines that is short)" if len(lines) < expected else ""),
+        )
+
+    missing = [w for w in required
+               if not re.search(rf"\b{re.escape(w)}\b", candidate, re.IGNORECASE)]
+    if missing:
+        quoted = ", ".join(f"'{w}'" for w in missing)
+        return CheckResult(
+            "fail",
+            f"the required word{'s' if len(missing) > 1 else ''} {quoted} "
+            f"do{'' if len(missing) > 1 else 'es'} not appear verbatim in the poem",
+        )
+
+    end_words = [_get_last_word(line) for line in lines]
+    for i, j in _rhyme_pairs(scheme):
+        if i >= len(end_words) or j >= len(end_words):
+            continue
+        if not _words_rhyme(end_words[i], end_words[j]):
+            return CheckResult(
+                "fail",
+                f"the scheme {scheme} requires line {i + 1} and line {j + 1} to "
+                f"rhyme, but they end in '{end_words[i]}' and '{end_words[j]}'",
+            )
+
+    return CheckResult(
+        "pass",
+        f"{expected} lines, every required word present, and every rhyme pair "
+        f"of {scheme} matches",
+    )
+
+
 # ── Registry: realises HasChecker(q), fixed per benchmark ────────────────────────
 
 # Keys are ``benchmark`` or ``benchmark:subtask``; lookup is most-specific-first,
@@ -428,6 +531,7 @@ CHECKERS: Dict[str, Checker] = {
     "gameof24": gameof24_checker,
     "cruxeval": cruxeval_checker,
     "programmingpuzzles": programmingpuzzles_checker,
+    "sonnetwriting": sonnet_checker,
     "bigbenchhard:multistep_arithmetic_two": multistep_arithmetic_checker,
 }
 

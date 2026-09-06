@@ -82,7 +82,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from baseline.basebaseline import BaseBaseline, BaselineResponse
+from baseline.basebaseline import (BaseBaseline, BaselineResponse,
+                                   is_generative_task)
 from baseline.FoT.checkers import CheckResult, Checker, get_checker
 from baseline.FoT.relations import (
     Relation,
@@ -98,19 +99,28 @@ from models.base import BaseLLM
 
 # ── Tagged-output parsers (Extract) ─────────────────────────────────────────────
 
-def _extract_answer(text: str) -> str:
+def _extract_answer(text: str, generative: bool = False) -> str:
     """Pull the final answer from the paper's ``ANSWER:`` tag.
 
     Falls back to a legacy ``### Answer`` section and finally the last non-empty
     line, so a parseable answer is recovered even when the model omits the tag.
+
+    ``generative`` is for the tasks where the response body *is* the answer (a
+    sonnet, an expression, a function body — see ``is_generative_task``). There
+    the block runs to the end of the response instead of stopping at the first
+    blank line, and the no-tag fallback keeps the whole text rather than its last
+    line: a sonnet written in stanzas would otherwise be truncated to its first
+    quatrain, and the truncated poem is what the benchmark would then grade.
     """
-    matches = list(re.finditer(r"ANSWER:\s*(.+?)(?:\n\s*\n|\Z)", text,
-                               re.DOTALL | re.IGNORECASE))
+    pattern = r"ANSWER:\s*(.+)\Z" if generative else r"ANSWER:\s*(.+?)(?:\n\s*\n|\Z)"
+    matches = list(re.finditer(pattern, text, re.DOTALL | re.IGNORECASE))
     if matches and matches[-1].group(1).strip():
         return matches[-1].group(1).strip()
     m = re.search(r"###\s*Answer\s*\n(.*?)(?=\n###|\Z)", text, re.DOTALL | re.IGNORECASE)
     if m and m.group(1).strip():
         return m.group(1).strip()
+    if generative:
+        return text.strip()
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     return lines[-1] if lines else text.strip()
 
@@ -314,10 +324,15 @@ class FoT(BaseBaseline):
         # output stays parseable; the falsifier's own calls receive only a one-line
         # task description, so the format persona never conflicts with "propose a
         # probe" / "rewrite this problem".
+        self._generative = False   # set per run(): the body IS the answer
         self._solve_ctx = ""   # system_prompt + instruction
         self._task_ctx = ""    # one-line task description only
 
     # ── helpers ────────────────────────────────────────────────────────────────
+    def _answer(self, text: str) -> str:
+        """``_extract_answer`` bound to this run's generative/short-answer mode."""
+        return _extract_answer(text, self._generative)
+
     def _gen(self, prompt: str, context: str, temperature: float):
         full = f"{context}\n\n{prompt}" if context else prompt
         return self.call_llm(full, temperature=temperature)
@@ -351,7 +366,7 @@ class FoT(BaseBaseline):
     def _solve_variant(self, question: str) -> str:
         """Solve a variant, reusing the answer if this variant was already solved."""
         if question not in self._answer_cache:
-            self._answer_cache[question] = _extract_answer(self.solve(question))
+            self._answer_cache[question] = self._answer(self.solve(question))
         return self._answer_cache[question]
 
     # ── Falsify : (q, a) → (w | ⊥, s)  (Algorithm 2) ────────────────────────────
@@ -364,7 +379,7 @@ class FoT(BaseBaseline):
         per-benchmark ``HasChecker(q)`` predicate; the regime never changes across
         rounds.
         """
-        answer = _extract_answer(candidate)
+        answer = self._answer(candidate)
         if self._has_checker:
             return self._falsify_executable(question, answer)
         return self._falsify_metamorphic(question, answer, round_index)
@@ -572,7 +587,7 @@ class FoT(BaseBaseline):
             "previous answer is correct. Make sure your new answer does not "
             "reintroduce any of the past failures listed.\n\n"
             f"Original problem:\n{question}\n\n"
-            f"Previous answer to the original problem:\n{_extract_answer(candidate)}\n\n"
+            f"Previous answer to the original problem:\n{self._answer(candidate)}\n\n"
             f"Equivalent formulations and the answers they received:\n"
             f"{witness.orbit_text}\n\n"
             f"Relations that must hold between those answers:\n"
@@ -628,6 +643,7 @@ class FoT(BaseBaseline):
         # falsifier's own calls get only the one-line task description.
         self._solve_ctx = "\n\n".join(p for p in (system_prompt, instruction) if p)
         self._task_ctx = (instruction or system_prompt or "").strip()
+        self._generative = is_generative_task(instruction, question)
         self._variant_cache = {}
         self._answer_cache = {}
 
@@ -636,7 +652,7 @@ class FoT(BaseBaseline):
             self._generate_catalogue(question)
 
         candidate = self.solve(question)                  # a ← Solve(q)
-        initial_answer = _extract_answer(candidate)
+        initial_answer = self._answer(candidate)
         trace: List[str] = [f"[Solve] {initial_answer!r}"]
         history: List[str] = []                           # H ← ∅
         records: List[Dict[str, Any]] = []
@@ -661,7 +677,7 @@ class FoT(BaseBaseline):
                          f"sound={witness.sound}) {witness.summary}")
             history.append(witness.summary)               # H ← H ∪ {w}
             candidate = self.repair(question, candidate, witness, history[:-1])
-            trace.append(f"[Repair k={k + 1}] → {_extract_answer(candidate)!r}")
+            trace.append(f"[Repair k={k + 1}] → {self._answer(candidate)!r}")
 
         returned = "fixpoint"
         if not accepted and archive:
@@ -672,9 +688,9 @@ class FoT(BaseBaseline):
             returned = "archive"
             if best != candidate:
                 candidate = best
-                trace.append(f"[Archive] best measured → {_extract_answer(candidate)!r}")
+                trace.append(f"[Archive] best measured → {self._answer(candidate)!r}")
 
-        final_answer = _extract_answer(candidate)
+        final_answer = self._answer(candidate)
         return self.create_response(
             final_answer=final_answer,
             reasoning_trace=candidate,

@@ -18,6 +18,34 @@ from typing import Any, Dict, List, Optional, Union
 from dataclasses import dataclass, field
 from models.base import BaseLLM, LLMResponse
 
+# Tasks where the generation *is* the answer, so pulling a short "final answer"
+# out of the response would discard it: arithmetic expressions (Game of 24), a
+# poem (SonnetWriting), a function or class body (HumanEval / MBPP / ClassEval).
+# Shared by ZeroShotCoT (which skips its extraction pass) and FoT (whose
+# ``ANSWER:`` capture otherwise stops at the first blank line, truncating a
+# stanza-separated sonnet to its first quatrain).
+def is_generative_task(instruction: Optional[str] = None,
+                       question: Optional[str] = None) -> bool:
+    """True when the response body is the answer and must not be summarised."""
+    instruction_lower = instruction.lower() if instruction else ""
+    question_lower = question.lower() if question else ""
+    return (
+        "expression" in instruction_lower or
+        "equation" in instruction_lower or
+        "formula" in instruction_lower or
+        "sonnet" in instruction_lower or
+        "sonnet" in question_lower or
+        "poem" in instruction_lower or
+        ("write" in instruction_lower and "line" in instruction_lower) or
+        "function body" in instruction_lower or
+        "function implementation" in instruction_lower or
+        ("implement" in instruction_lower and "function" in instruction_lower) or
+        ("implement" in instruction_lower and "class" in instruction_lower) or
+        "class implementation" in instruction_lower or
+        "class body" in instruction_lower
+    )
+
+
 @dataclass
 class BaselineResponse:
     """Container for a standardized baseline execution response.

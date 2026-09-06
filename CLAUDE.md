@@ -174,7 +174,7 @@ Implements the paper's driver loop (Algorithm 4): `a ← Solve(q)`, then up to `
 
 The guiding principle is **refute by construction, not by verdict**: the model is refuted by its own outputs, never by its own self-assessment. No prompt in FoT asks "is this correct?" — the model only ever produces objects (an answer, a probe, a variant of the problem, an answer to that variant) and every accept/refute verdict is issued by a checker or by the driver's own comparison. Two regimes, selected by `HasChecker(q)` — **fixed per benchmark, never decided at run time by the model**:
 
-- **Executable** — for benchmarks with a registered trusted checker `c_q` in `CHECKERS` (`baseline/FoT/checkers.py`): `gameof24` (arithmetic evaluation), `cruxeval` (program execution), `programmingpuzzles` (`sat()` predicate), `bigbenchhard:multistep_arithmetic_two` (expression recomputation), `checkmate` (position replay via `python-chess` — the one **conditional** entry: registered only when `chess` imports, so a host without it falls back to the metamorphic regime, where checkmate has no catalogue and FoT degrades to FoT ≡ Solve). The model only *proposes a probe*; the external checker returns the verdict, so witnesses are **sound** and a correct candidate is never discarded. Checkers return `fail` / `pass` / `undecided`, and `undecided` counts as survival. Keys are `benchmark` or `benchmark:subtask`, resolved most-specific-first. `n` and `τ` are forced to **1** here: `c_q` is deterministic and probe-independent, so a second probe could only repeat the first verdict.
+- **Executable** — for benchmarks with a registered trusted checker `c_q` in `CHECKERS` (`baseline/FoT/checkers.py`): `gameof24` (arithmetic evaluation), `cruxeval` (program execution), `programmingpuzzles` (`sat()` predicate), `bigbenchhard:multistep_arithmetic_two` (expression recomputation), `sonnetwriting` (re-runs the benchmark's own three constraints), `checkmate` (position replay via `python-chess` — the one **conditional** entry: registered only when `chess` imports, so a host without it falls back to the metamorphic regime, where checkmate has no catalogue and FoT degrades to FoT ≡ Solve). The model only *proposes a probe*; the external checker returns the verdict, so witnesses are **sound** and a correct candidate is never discarded. Checkers return `fail` / `pass` / `undecided`, and `undecided` counts as survival. Keys are `benchmark` or `benchmark:subtask`, resolved most-specific-first. `n` and `τ` are forced to **1** here: `c_q` is deterministic and probe-independent, so a second probe could only repeat the first verdict.
 - **Metamorphic** — every other benchmark. `Sample(C, n)` draws `n` (`--fot_probes`, default 3) relations from a fixed, human-audited catalogue `C` (`baseline/FoT/relations.py`), applies each transformation to the query, solves each variant **independently** with `pi_solve`, and collects the violations `V` together with the orbit `O = {a} ∪ {g⁻¹(a'ᵢ)}`. The witness is `⟨V, O⟩` — a concrete disagreement between the model's own outputs, never an opinion.
 
 Three design decisions carry the weight of the metamorphic branch:
@@ -287,6 +287,31 @@ the opponent can reply Rxg8"`, never the legal-move set and never the mating mov
 detail goes into `pi_rep` and must not hand the model the answer the benchmark withholds.
 The candidate is resolved with the benchmark's own `extract_move`, so the verifier plays exactly
 the move the grader will score.
+
+### SonnetWriting Evaluation Details
+Both gradeable constraints — the rhyme scheme and the required words — are stated in the
+prompt itself, so FoT runs in the **executable regime** here: `sonnet_checker` reads them off
+the question (never from the dataset target) and re-runs the benchmark's own primitives
+(`_rhyme_pairs`, `_get_last_word`, `_words_rhyme`). It is therefore not merely sound but
+**decisive** — verified over 1250 cases (250 questions × 5 answer shapes): the checker's verdict
+matched the grader's on every one, with no `undecided`. Unlike checkmate, nothing has to be
+withheld from the repair: the constraints are public, so the failure detail is fully concrete
+("the scheme ABAB CDCD EFEF GG requires line 1 and line 3 to rhyme, but they end in 'stay' and
+'stone'"). One violation is reported at a time, most structural first (line count → missing word
+→ rhyme): a poem of the wrong length has to be resized before its rhymes mean anything.
+
+**The answer must not be truncated.** `_extract_answer`'s `ANSWER:` capture is non-greedy and
+stops at the first blank line, which cuts a stanza-separated sonnet down to its first quatrain —
+and the truncated poem is what the benchmark then grades. FoT now consults
+`is_generative_task()` (factored out of `ZeroShotCoT`, where the same guard already lived, into
+`baseline/basebaseline.py` so both share one definition) and, for those tasks, captures to the
+end of the response. Measured on 25 questions with qwen2.5:32b: **0% → 24%** accuracy from the
+extraction fix alone (mean score 0.404 → 0.818), then **24% → 32%** from the checker.
+
+Because the executable regime's damage score is binary, every failing candidate ties at
+`Damage(1, 0)` and the archive's tie-break returns the *earliest* — so when no repair reaches a
+passing sonnet, FoT returns the initial answer unchanged. That is why the checker fixed 2 and
+broke 0: on this benchmark FoT either finds a conforming poem or leaves Solve's alone.
 
 ### BigBenchHard Task Categories
 - **Boolean/Yes-No** (6): `boolean_expressions`, `causal_judgement`, `formal_fallacies`, `navigate`, `sports_understanding`, `web_of_lies`
