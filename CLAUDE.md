@@ -92,6 +92,16 @@ Prompt-based-Reasoning/
 │   ├── eval_got.sh
 │   └── eval_fot.sh
 │
+├── RAG/                     # Knowledge-intensive QA: retrieval strategy × CoT/FoT (Table 4.6)
+│   ├── eval.py              # Entry point (separate from main.py; see "RAG Experiments")
+│   ├── metrics.py           # EM / F1 (official HotpotQA normalisation), yes/no accuracy
+│   ├── base/                # Data-loader & strategy ABCs, generators (Ollama/HF), BM25 retriever
+│   ├── baseline/            # NoRetrieval, SingleRound, IRCoT, DRAGIN
+│   ├── reasoning/           # cot.py, fot.py (RAGFoT), relations.py (QA relation catalogue)
+│   ├── datasets/            # HotpotQA, MuSiQue, 2WikiMQA, IIRC, StrategyQA loaders + exemplars
+│   ├── data/                # Corpora and BM25 indexes (gitignored, built on first use)
+│   └── results/             # Per-question .jsonl + summary .json (gitignored)
+│
 ├── results/                 # Auto-created JSON run results (gitignored)
 │
 ├── benchmark/               # Reasoning Task Datasets
@@ -329,6 +339,53 @@ identical text stay unmatched rather than being guessed. Because `evaluate_answe
 ground_truth)` never sees the question, the option map comes from the problem most recently
 returned by `get_problem()`; a standalone `evaluate_answer` call outside the fetch-then-grade
 loop degrades to letter-only matching.
+
+---
+
+## RAG Experiments (Table 4.6)
+
+`RAG/` evaluates FoT combined with training-free RAG on knowledge-intensive QA. One run of
+`RAG/eval.py` is one cell: dataset × retrieval strategy × reasoning mode × LLM. It is a separate
+entry point from `main.py`. Run it as `python RAG/eval.py ...`; it fixes `sys.path` and the
+working directory itself, because `RAG/datasets` would otherwise shadow the HF `datasets` package.
+
+```bash
+python RAG/eval.py --dataset hotpotqa --retrieval ircot --reasoning fot --model qwen2.5:32b
+python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset 2wikimqa --retrieval dragin
+./eval/eval_rag.sh            # full sweep; BACKEND=hf MODEL=... to include DRAGIN
+```
+
+| Flag | Values | Notes |
+|------|--------|-------|
+| `--retrieval` | `none \| single \| ircot \| dragin` | No Retrieval, Single-round, IRCoT (Trivedi'23), DRAGIN (Su'24) |
+| `--reasoning` | `cot \| fot` | FoT = `RAGFoT`: Solve is the retrieval strategy itself |
+| `--dataset` | `hotpotqa \| musique \| 2wikimqa \| iirc \| strategyqa` | EM/F1; StrategyQA reports accuracy |
+| `--backend` | `ollama \| hf` | **DRAGIN requires `hf`** (token entropies + attention) |
+| `--corpus` | `wiki \| dataset` | DPR Wikipedia 21M passages (DRAGIN) or per-dataset contexts (IRCoT App. A) |
+| `--num_samples` | `1000` | Front of the split, as DRAGIN samples it; `-1` = all |
+| `--prompt_format` | `chat \| raw` | `chat` (default): exemplars as turns + prefilled partial CoT; `raw`: DRAGIN's flat template |
+
+Key facts:
+- **Splits**: the linked HotpotQA-fullwiki / 2Wiki `test` splits and the StrategyQA `test` file have
+  **no gold answers**; defaults are HotpotQA/2Wiki/MuSiQue/IIRC `validation` and StrategyQA `train`
+  (the file DRAGIN evaluates on). IIRC drops unanswerable questions → 954, matching DRAGIN.
+  Questions that coincide with a few-shot exemplar are dropped.
+- **Shared prompt**: every strategy builds its prompt with `BaseRAG.build_prompt` (DRAGIN App. F
+  template and exemplars; MuSiQue uses IRCoT Listing 3). A CoT ends in "So the answer is X."; if
+  not, "So the answer is" is appended and completed (DRAGIN App. B).
+- **Retriever**: BM25 via `bm25s` (Lucene variant, k1=1.2, b=0.75 = Elasticsearch defaults,
+  English stopwords dropped). Indexes live in `RAG/data/index/<wiki|dataset>`; the wiki index
+  takes ~1 h to build once (`--build_index_only`). The DPR dump is downloaded automatically.
+- **FoT for QA**: `baseline/FoT/relations.py` has no QA entries, so `RAG/reasoning/relations.py`
+  supplies the catalogue: `qa_swap_operands` (programmatic), `qa_decompose` (increasing),
+  `qa_paraphrase`, `qa_cloze`. Model-written variants must keep every number and name, and may
+  add no new name (`preserves_surface`). rho is `RAG.metrics.answer_key`, not FoT's numeric
+  `answer_key`, which `FoT._key` now lets a subclass override. Each variant is solved by the
+  full retrieval strategy, so it retrieves its own evidence; Repair sees the orbit's passages.
+- **Output**: `RAG/results/{dataset}_{retrieval}_{reasoning}_{model}_{ts}.jsonl` (per question,
+  written incrementally; `--resume` continues it) and a `.json` summary.
+- **GPU caveat**: on a host whose NVIDIA driver predates CUDA 13, the env's `torch 2.11+cu130`
+  sees no GPU and `--backend hf` silently runs on CPU.
 
 ---
 

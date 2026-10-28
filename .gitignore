@@ -215,3 +215,7 @@ __marimo__/
 benchmark/APPS/data
 results/
 
+
+# RAG experiments: downloaded corpora / BM25 indexes and run outputs
+RAG/data/
+RAG/results/
