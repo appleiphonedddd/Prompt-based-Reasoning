@@ -145,11 +145,12 @@ def _parse_variant(text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def _majority_keys(orbit: List[str]) -> List[str]:
+def _majority_keys(orbit: List[str],
+                   key_fn: Callable[[str], str] = answer_key) -> List[str]:
     """Majority(O): the canonical keys of the most frequent orbit members."""
     counts: Dict[str, int] = {}
     for value in orbit:
-        key = answer_key(value)
+        key = key_fn(value)
         counts[key] = counts.get(key, 0) + 1
     if not counts:
         return []
@@ -333,6 +334,16 @@ class FoT(BaseBaseline):
         """``_extract_answer`` bound to this run's generative/short-answer mode."""
         return _extract_answer(text, self._generative)
 
+    def _key(self, answer: str) -> str:
+        """Canonical answer key for orbit support and Majority(O).
+
+        Must agree with the catalogue's rho (two answers rho calls equal share a
+        key). Overridable for answer spaces where :func:`answer_key`'s numeric
+        reading is wrong, e.g. open-domain QA, where "July 21, 1926" and
+        "July 21, 1930" would otherwise share the key 21.
+        """
+        return answer_key(answer)
+
     def _gen(self, prompt: str, context: str, temperature: float):
         full = f"{context}\n\n{prompt}" if context else prompt
         return self.call_llm(full, temperature=temperature)
@@ -513,13 +524,13 @@ class FoT(BaseBaseline):
                                       not variant.holds(answer, a_prime)))
 
         violated = [e for e in entries if e.violated]
-        support = sum(1 for o in orbit if answer_key(o) == answer_key(answer))
+        support = sum(1 for o in orbit if self._key(o) == self._key(answer))
         damage = Damage(len(violated), support)
 
         if len(violated) < max(1, self.tau):
             return None, damage           # not corroborated: survives this round
         if self.orbit_majority and len(orbit) > 1 and (
-                answer_key(answer) in _majority_keys(orbit)):
+                self._key(answer) in _majority_keys(orbit, self._key)):
             # The bulk of the orbit agrees with a: the defect is more likely to sit
             # at a variant's answer than at the candidate, so no repair fires.
             return None, damage
@@ -713,7 +724,7 @@ class FoT(BaseBaseline):
                 # matrix, and the witness records give witness precision per regime
                 # and per relation, once ground truth is joined.
                 "initial_answer": initial_answer,
-                "answer_changed": answer_key(initial_answer) != answer_key(final_answer),
+                "answer_changed": self._key(initial_answer) != self._key(final_answer),
                 "witnesses": records,
                 "witness_history": history,
             },
