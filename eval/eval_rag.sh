@@ -3,59 +3,74 @@ set -e
 cd "$(dirname "$0")/.."
 
 # Table 4.6 — knowledge-intensive QA: retrieval strategy x reasoning (CoT / FoT).
-#
-# Every row of one table must use the same LLM *and backend*, so that differences
-# reflect the retrieval strategy alone. DRAGIN reads token entropies and attention,
-# which only a local Hugging Face model exposes, so the full table (all four
-# retrieval rows) needs BACKEND=hf:
-#
-#   BACKEND=hf MODEL=Qwen/Qwen2.5-7B-Instruct ./eval/eval_rag.sh
-#
-# With the default Ollama backend the DRAGIN rows are skipped.
-#
-# The first run builds the BM25 index over the DPR Wikipedia dump (21M passages,
-# ~1 h, one-time). For a quick pass use CORPUS=dataset (IRCoT's per-dataset
-# corpora) and fewer questions, e.g. NUM_SAMPLES=100.
+# Every run evaluates the first 1000 questions of the split (DRAGIN's setting) and
+# retrieves from the DPR Wikipedia dump with BM25. The first run builds that index
+# (21M passages, ~1 h, one-time). Add --num_samples 100 for a quick pass.
 
-BACKEND=${BACKEND:-ollama}
-MODEL=${MODEL:-qwen2.5:32b}
-CORPUS=${CORPUS:-wiki}
-NUM_SAMPLES=${NUM_SAMPLES:-1000}
-WORKERS=${WORKERS:-1}
+# No Retrieval — parametric knowledge only (the reference row).
+#python RAG/eval.py --model qwen2.5:32b --dataset hotpotqa --retrieval none --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset hotpotqa --retrieval none --reasoning fot
 
-RETRIEVALS="none single ircot"
-if [ "$BACKEND" = "hf" ]; then
-  RETRIEVALS="$RETRIEVALS dragin"
-fi
+python RAG/eval.py --model qwen2.5:32b --dataset musique --retrieval none --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset musique --retrieval none --reasoning fot
 
-for dataset in hotpotqa musique 2wikimqa iirc strategyqa; do
-  for retrieval in $RETRIEVALS; do
-    for reasoning in cot fot; do
-      python RAG/eval.py --backend "$BACKEND" --model "$MODEL" --corpus "$CORPUS" \
-        --num_samples "$NUM_SAMPLES" --workers "$WORKERS" \
-        --dataset "$dataset" --retrieval "$retrieval" --reasoning "$reasoning"
-    done
-  done
-done
+python RAG/eval.py --model qwen2.5:32b --dataset 2wikimqa --retrieval none --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset 2wikimqa --retrieval none --reasoning fot
 
-# Ablations — uncomment to run.
+python RAG/eval.py --model qwen2.5:32b --dataset iirc --retrieval none --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset iirc --retrieval none --reasoning fot
+
+python RAG/eval.py --model qwen2.5:32b --dataset strategyqa --retrieval none --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset strategyqa --retrieval none --reasoning fot
+
+# Single-round — retrieve once with the question, before reasoning.
+python RAG/eval.py --model qwen2.5:32b --dataset hotpotqa --retrieval single --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset hotpotqa --retrieval single --reasoning fot
+
+python RAG/eval.py --model qwen2.5:32b --dataset musique --retrieval single --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset musique --retrieval single --reasoning fot
+
+python RAG/eval.py --model qwen2.5:32b --dataset 2wikimqa --retrieval single --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset 2wikimqa --retrieval single --reasoning fot
+
+python RAG/eval.py --model qwen2.5:32b --dataset iirc --retrieval single --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset iirc --retrieval single --reasoning fot
+
+python RAG/eval.py --model qwen2.5:32b --dataset strategyqa --retrieval single --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset strategyqa --retrieval single --reasoning fot
+
+# IRCoT — retrieve again after every CoT sentence, with that sentence as the query.
+python RAG/eval.py --model qwen2.5:32b --dataset hotpotqa --retrieval ircot --reasoning cot
+#python RAG/eval.py --model qwen2.5:32b --dataset hotpotqa --retrieval ircot --reasoning fot
+
+python RAG/eval.py --model qwen2.5:32b --dataset musique --retrieval ircot --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset musique --retrieval ircot --reasoning fot
+
+python RAG/eval.py --model qwen2.5:32b --dataset 2wikimqa --retrieval ircot --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset 2wikimqa --retrieval ircot --reasoning fot
+
+python RAG/eval.py --model qwen2.5:32b --dataset iirc --retrieval ircot --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset iirc --retrieval ircot --reasoning fot
+
+python RAG/eval.py --model qwen2.5:32b --dataset strategyqa --retrieval ircot --reasoning cot
+python RAG/eval.py --model qwen2.5:32b --dataset strategyqa --retrieval ircot --reasoning fot
+
+# DRAGIN — retrieve when the model's token uncertainty (RIND) says so, with a query
+# read off its self-attention (QFS). It needs token entropies and attention weights,
+# which Ollama does not expose, so it runs only on a local Hugging Face model.
+# Every row of one table must use the same model and backend: to put DRAGIN in the
+# table, run the rows above with the same --backend hf --model as well.
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset hotpotqa --retrieval dragin --reasoning cot
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset hotpotqa --retrieval dragin --reasoning fot
 #
-# (a) IRCoT reading its answer off the retrieval CoT instead of a separate reader
-#     (IRCoT App. F, Table 6).
-# python RAG/eval.py --dataset hotpotqa --retrieval ircot --ircot_reader none
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset musique --retrieval dragin --reasoning cot
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset musique --retrieval dragin --reasoning fot
 #
-# (b) FoT's pilot trigger: a single violation repairs, no orbit-majority rule.
-# python RAG/eval.py --dataset hotpotqa --retrieval single --reasoning fot \
-#   --fot_tau 1 --no_fot_orbit_majority
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset 2wikimqa --retrieval dragin --reasoning cot
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset 2wikimqa --retrieval dragin --reasoning fot
 #
-# (c) FoT with only the programmatic / only the reliability-increasing relation.
-# python RAG/eval.py --dataset 2wikimqa --retrieval single --reasoning fot \
-#   --fot_relations qa_swap_operands
-# python RAG/eval.py --dataset hotpotqa --retrieval single --reasoning fot \
-#   --fot_relations qa_decompose --fot_tau 1
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset iirc --retrieval dragin --reasoning cot
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset iirc --retrieval dragin --reasoning fot
 #
-# (d) DRAGIN's RIND threshold sweep (DRAGIN Table 5).
-# for t in 0.6 0.8 1.0 1.2 1.4; do
-#   python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct \
-#     --dataset hotpotqa --retrieval dragin --dragin_threshold $t
-# done
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset strategyqa --retrieval dragin --reasoning cot
+# python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset strategyqa --retrieval dragin --reasoning fot

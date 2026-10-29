@@ -352,7 +352,7 @@ working directory itself, because `RAG/datasets` would otherwise shadow the HF `
 ```bash
 python RAG/eval.py --dataset hotpotqa --retrieval ircot --reasoning fot --model qwen2.5:32b
 python RAG/eval.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --dataset 2wikimqa --retrieval dragin
-./eval/eval_rag.sh            # full sweep; BACKEND=hf MODEL=... to include DRAGIN
+./eval/eval_rag.sh            # full sweep (30 Ollama runs); DRAGIN lines are commented out (need --backend hf)
 ```
 
 | Flag | Values | Notes |
