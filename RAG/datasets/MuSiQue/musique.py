@@ -1,20 +1,3 @@
-"""
-MuSiQue (Trivedi et al., 2022) — 2-4 hop questions composed from single-hop ones.
-
-Source: https://huggingface.co/datasets/dgslibisey/MuSiQue (``validation``, 2417
-questions; the answerable subset, as IRCoT uses). Gold aliases are the answer
-plus ``answer_aliases``.
-
-Corpus for ``--corpus dataset``: the 20 paragraphs attached to every question,
-pooled over train and validation (IRCoT App. A).
-
-DRAGIN does not evaluate MuSiQue, so there is no App. F prompt and no Table 9
-column. The exemplars are the first eight CoT annotations of IRCoT Listing 3,
-rewritten into the shared "So the answer is X." form, and the generation
-defaults follow HotpotQA's (the closest multi-hop setting in Table 9), with a
-longer budget for the extra hops.
-"""
-
 from __future__ import annotations
 
 from typing import Iterator, List

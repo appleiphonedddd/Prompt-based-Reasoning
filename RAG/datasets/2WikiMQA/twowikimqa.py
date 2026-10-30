@@ -1,17 +1,3 @@
-"""
-2WikiMultihopQA (Ho et al., 2020) — multi-hop QA over Wikipedia + Wikidata.
-
-Source: https://huggingface.co/datasets/framolfese/2WikiMultihopQA
-The ``test`` split ships with empty answers (the official test labels are
-withheld), so the default is the ``validation`` (dev) split, 12576 questions — the
-split both DRAGIN and IRCoT evaluate on.
-
-Corpus for ``--corpus dataset``: every context paragraph, supporting and not,
-pooled over train / validation / test (IRCoT App. A; ~430k unique paragraphs).
-
-Prompt: DRAGIN App. F, Prompt 1 (6 exemplars, no instruction line).
-"""
-
 from __future__ import annotations
 
 from typing import Iterator, List

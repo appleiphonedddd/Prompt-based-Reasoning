@@ -1,25 +1,3 @@
-"""
-IIRC (Ferguson et al., 2020) — incomplete-information reading comprehension.
-
-Source: https://huggingface.co/datasets/voidful/IIRC (``validation``). Each row is
-one main passage with its questions nested under ``questions``; they are
-flattened here. Questions whose answer type is ``none`` (unanswerable) are
-dropped, as in DRAGIN and IRCoT. Gold aliases by answer type:
-
-- ``span``   — the answer spans joined in order (most answers have one span);
-- ``value``  — the value, and the value with its unit ("4" and "4 years");
-- ``binary`` — "yes" / "no".
-
-Like DRAGIN (App. F, Prompt 8) the question is asked open-domain: the main passage
-is *not* shown, and everything must be retrieved.
-
-Corpus for ``--corpus dataset``: the linked Wikipedia articles of the official
-release (``context_articles.json``, downloaded on first use) plus the main
-passages, stripped of HTML and cut into 100-word passages (IRCoT App. A).
-
-Prompt: DRAGIN App. F, Prompt 7 (8 exemplars).
-"""
-
 from __future__ import annotations
 
 import json

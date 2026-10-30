@@ -1,21 +1,3 @@
-"""
-StrategyQA (Geva et al., 2021) — yes/no questions with implicit reasoning steps.
-
-Source: https://huggingface.co/datasets/voidful/StrategyQA (raw JSON files). The
-``test`` file carries no labels (490 rows of ``qid`` + ``question`` only), so the
-default is ``train`` (2290 labelled questions) — the file DRAGIN evaluates on:
-the test question of its App. F Prompt 5 ("Are more people today related to
-Genghis Khan than Julius Caesar?") is that file's first row. ``train_filtered``
-is accepted too.
-
-Metric: accuracy of the yes/no verdict.
-
-Corpus for ``--corpus dataset``: ``strategyqa_train_paragraphs.json``, the
-Wikipedia paragraphs annotated as evidence.
-
-Prompt: DRAGIN App. F, Prompt 5 (Wei et al., 2022).
-"""
-
 from __future__ import annotations
 
 import json
