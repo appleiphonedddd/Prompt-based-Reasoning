@@ -1,19 +1,3 @@
-"""
-HotpotQA (Yang et al., 2018) — open-domain multi-hop QA, fullwiki setting.
-
-Source: https://huggingface.co/datasets/hotpotqa/hotpot_qa (config ``fullwiki``).
-The ``test`` split of the fullwiki config ships with its answers withheld
-(``answer`` is null for every row), so it cannot be scored; like DRAGIN and IRCoT,
-the default is the ``validation`` split (7405 questions).
-
-Corpus for ``--corpus dataset``: the context paragraphs of the ``distractor``
-config, pooled over train and validation — every question's two gold paragraphs
-plus eight distractors. (The fullwiki config's own contexts are TF-IDF retrieved
-and need not contain the gold paragraphs.)
-
-Prompt: DRAGIN App. F, Prompt 3 (8 exemplars, Trivedi et al. 2022).
-"""
-
 from __future__ import annotations
 
 from typing import Iterator, List
